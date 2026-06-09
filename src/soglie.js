@@ -1,5 +1,5 @@
 /**
- * CLOUDFLARE WORKER: SOGLIE & BACKTEST UNIFICATO
+ * CLOUDFLARE WORKER: SOGLIE e BACKTEST UNIFICATO
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite)
  * Scrive in: DB_SOGLIE (soglie_campionati)
