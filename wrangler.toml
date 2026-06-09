@@ -1,1 +1,17 @@
+name = "soglie"
+main = "src/soglie.js"
+compatibility_date = "2024-03-01"
 
+# Trigger per l'auto-calibrazione notturna alle 00:00
+[triggers]
+cron = [ "0 0 * * *" ]
+
+[[d1_databases]]
+binding = "DB_PRONOSTICI"
+database_name = "pronostici_partite"
+database_id = "6f393ca6-0ebc-4f37-98db-3df8857222ed"
+
+[[d1_databases]]
+binding = "DB_SOGLIE"
+database_name = "soglie_campionati"
+database_id = "6bde4e75-41f2-40c1-85e7-4abd5a045043"
