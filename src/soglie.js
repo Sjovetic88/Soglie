@@ -139,6 +139,19 @@ export default {
           return responseJSON({ error: "Parametro 'campionato' mancante" }, 400);
         }
 
+        // PRE-FLIGHT CHECK SINCRO: Verifichiamo la presenza di tabelle e colonne prima di avviare lo streaming!
+        try {
+          if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
+            return responseJSON({ error: "Configurazione database incompleta o binding mancanti nel wrangler.toml" }, 500);
+          }
+          // Test di lettura dal database pronostici
+          await env.DB_PRONOSTICI.prepare("SELECT date, home_team, away_team FROM validazione_risultati WHERE campionato = ? LIMIT 1;").bind(campionato).first();
+          // Test di lettura dal database soglie
+          await env.DB_SOGLIE.prepare("SELECT * FROM calibrazioni_giornaliere LIMIT 1;").first();
+        } catch (dbErr) {
+          return responseJSON({ error: "ERRORE DI COMPILAZIONE DATABASE D1: " + dbErr.message }, 500);
+        }
+
         const { readable, writable } = new TransformStream();
         const writer = writable.getWriter();
         const encoder = new TextEncoder();
@@ -245,7 +258,7 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
     return;
   }
 
-  // Chiamata corretta della funzione con la sua firma allineata
+  // FIRMA ALLINEATA SENZA REFUSI
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
   const mappaCache = new Map(cacheCalibrazioni.map(c => [c.date_calibrazione, c]));
 
@@ -627,7 +640,7 @@ function preparaQuerySalvataggioCache(d, env) {
   );
 }
 
-// FIRMA CORRETTA ED ALLINEATA DELLA FUNZIONE DI CACHE
+// FIRMA DEFINTIVAMENTE CORRETTA SENZA REFUSI
 async function caricaCacheCalibrazioni(campionato, env) {
   const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
   const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
@@ -901,7 +914,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                 const payload = await res.json();
                 campionati = payload.campionati;
                 
-                // Aggiorna dinamicamente l'ora dell'ultima elaborazione globale nell'header
+                // Aggiorna l'ora dell'ultima elaborazione globale nell'header
                 const subHeader = document.getElementById('stat-allineamento-globale');
                 if (payload.ultima_elaborazione_globale && payload.ultima_elaborazione_globale !== "-") {
                     subHeader.textContent = "ULTIMA ELABORAZIONE: " + formattaDataMMDDYYYY_conOra(payload.ultima_elaborazione_globale);
@@ -916,9 +929,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                     card.id = 'card-' + cleanId;
                     card.className = "amoled-card rounded-xl p-4 transition duration-200 cursor-pointer select-none flex flex-col gap-2";
                     
-                    // Al click selezioniamo/deselezioniamo il campionato
                     card.onclick = (e) => {
-                        // Impedisce di togglare la selezione se l'utente clicca sui risultati o se c'è un calcolo attivo
                         if (isProcessingInCorso) return;
                         if (e.target.closest('.dettagli-backtest-box')) return;
                         if (e.target.closest('.progresso-inline-box')) return;
@@ -928,7 +939,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                     const badgeColore = item.aggiornato ? "text-emerald-400 bg-emerald-950/40" : "text-zinc-600 bg-zinc-950/40";
                     const badgeTesto = item.aggiornato ? "CALIBRATO" : "IN ATTESA";
 
-                    // Formattiamo staticamente il record dell'ultimo match nel formato MM-DD-YYYY
+                    // Formattazione staticamente dell'ultimo match nel formato richiesto
                     const dataInizialeFmt = formattaDataMMDDYYYY(item.ultimo_match_data);
                     const homeTeamFmt = item.ultimo_match_home.toUpperCase();
                     const awayTeamFmt = item.ultimo_match_away.toUpperCase();
@@ -1133,15 +1144,26 @@ function ottieniHTMLDashboardEngineCompleto() {
                     }
                 };
 
-                connection.onerror = function() {
+                // GESTIONE DIAGNOSTICA ATTIVA IN CASO DI ERRORE DI CONNESSIONE
+                connection.onerror = async function() {
                     connection.close();
                     document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                     
                     const desc = document.getElementById('desc-' + idCamp);
                     desc.textContent = desc.dataset.original;
 
-                    // Allarme visivo se la connessione fallisce prima di aprirsi (D1 vuoto o tabelle mancanti)
-                    alert("✖ ERRORE DI CONNESSIONE STREAMING (" + campionato + ")\\n\\nIl Worker si è arrestato prima di iniziare. Verifica di aver lanciato lo script di migrazione SQL per creare le tabelle nel tuo database 'soglie_campionati'.");
+                    // Recupera l'errore SQL formattato inviato dal Worker tramite Pre-flight
+                    try {
+                        const errRes = await fetch('/backtest?campionato=' + encodeURIComponent(campionato));
+                        if (!errRes.ok) {
+                            const errData = await errRes.json().catch(() => ({}));
+                            alert("✖ ERRORE DI ELABORAZIONE (" + campionato + ")\\n\\n" + (errData.error || "La connessione si è arrestata improvvisamente."));
+                        } else {
+                            alert("✖ ERRORE DI CONNESSIONE STREAMING (" + campionato + ")\\n\\nConnessione chiusa senza dati.");
+                        }
+                    } catch (e) {
+                        alert("✖ ERRORE DI RETE (" + campionato + ")\\n\\nImpossibile raggiungere il server.");
+                    }
                     resolve();
                 };
             });
