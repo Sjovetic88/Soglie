@@ -1,5 +1,5 @@
 /**
- * GOLDBET SOGLIE (AMOLED ENGINE APPNATIVE)
+ * GOLDBET SOGLIE
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
  * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
