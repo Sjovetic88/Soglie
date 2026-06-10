@@ -41,7 +41,7 @@ export default {
         }
       }
 
-      // 3. API: Estrazione dei campionati, metadati e data ultima elaborazione globale
+      // 3. API: Estrazione dei campionati, metadati e data ultima elaborazione globale (Ottimizzata)
       if (path === "/api/campionati") {
         try {
           if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
@@ -74,7 +74,7 @@ export default {
 
           const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
 
-          // Dettagli dell'ultimo match effettivo di ogni campionato per caricarlo sulla UI in modo statico
+          // Caricamento selettivo dei dati minimi per l'ultimo match
           const dettagliMatchCompleti = [];
           for (const r of d1Results) {
             const queryUltimoMatch = `
@@ -132,7 +132,7 @@ export default {
         }
       }
 
-      // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match con tracciamento dati estesi
+      // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match con tracciamento dati estesi (OTTIMIZZATO RAM)
       if (path === "/backtest") {
         const campionato = url.searchParams.get("campionato");
         if (!campionato) {
@@ -144,7 +144,7 @@ export default {
           if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
             return responseJSON({ error: "Configurazione database incompleta o binding mancanti nel wrangler.toml" }, 500);
           }
-          // Test di lettura dal database pronostici
+          // Test di lettura limitato dal database pronostici
           await env.DB_PRONOSTICI.prepare("SELECT date, home_team, away_team FROM validazione_risultati WHERE campionato = ? LIMIT 1;").bind(campionato).first();
           // Test di lettura dal database soglie
           await env.DB_SOGLIE.prepare("SELECT * FROM calibrazioni_giornaliere LIMIT 1;").first();
@@ -245,8 +245,14 @@ async function eseguiCalibrazioneLiveTuttiCampionati(env) {
 }
 
 async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
+  // OTTIMIZZATO: Escludiamo i campi superflui caricando solo le colonne matematiche e i dati essenziali
   const queryTuttiMatch = `
-    SELECT * FROM validazione_risultati 
+    SELECT date, home_team, away_team, fthg, ftag,
+           prob_1, prob_X, prob_2, prob_gg, prob_ng,
+           prob_u05, prob_o05, prob_u15, prob_o15, prob_u25, prob_o25,
+           prob_u35, prob_o35, prob_u45, prob_o45,
+           prob_sg0, prob_sg1, prob_sg2, prob_sg3, prob_sg4, prob_sg5, prob_sg6p
+    FROM validazione_risultati 
     WHERE campionato = ? AND date IS NOT NULL AND fthg IS NOT NULL AND ftag IS NOT NULL
     ORDER BY date ASC;
   `;
@@ -258,7 +264,7 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
     return;
   }
 
-  // FIRMA PERFETTAMENTE CORRETTA E SINCERATA ALLINEATA
+  // Caricamento della cache delle calibrazioni
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
   const mappaCache = new Map(cacheCalibrazioni.map(c => [c.date_calibrazione, c]));
 
@@ -288,6 +294,8 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
 
     if (!soglieGiornata) {
       const dataLimiteInferiore = calcolaDataMenoGiorni(dataCorrente, 1000);
+      
+      // OTTIMIZZATO: Utilizziamo il confronto diretto di stringhe per la data anziché istanziare oggetti Date
       const finestraMatch = tuttiMatch.filter(m => m.date >= dataLimiteInferiore && m.date < dataCorrente);
 
       if (finestraMatch.length >= 50) {
@@ -367,6 +375,8 @@ function calibraInMemoria(partiteStoriche) {
 
   for (const finestra of PARAM_FINESTRE) {
     const dataLimite = calcolaDataMenoGiorni(partiteConEsito[partiteConEsito.length - 1].date, finestra);
+    
+    // OTTIMIZZATO: Confronto diretto di stringhe
     const matchFiltrati = partiteConEsito.filter(m => m.date >= dataLimite);
 
     if (matchFiltrati.length < 30) continue;
@@ -551,64 +561,13 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 // FUNZIONI DI ASSISTENZA MATEMATICA E TEMPO
 // ==========================================
 
-async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
-  const dataInizio = calcolaDataMenoGiorni(dataRiferimento, giorniIndietro);
-  const query = `
-    SELECT * FROM validazione_risultati 
-    WHERE campionato = ? 
-      AND date >= ? 
-      AND date < ?
-      AND fthg IS NOT NULL 
-      AND ftag IS NOT NULL
-    ORDER BY date ASC;
-  `;
-  const { results } = await env.DB_PRONOSTICI.prepare(query).bind(campionato, dataInizio, dataRiferimento).all();
+async function caricaCacheCalibrazioni(campionato, env) {
+  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
+  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
   return results;
 }
 
-async function salvaSogliaAttiva(campionato, dataOggi, soglie, env) {
-  const query = `
-    INSERT INTO soglie_attive (
-      campionato, date_aggiornamento,
-      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
-      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
-      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
-      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    ) ON CONFLICT(campionato) DO UPDATE SET
-      date_aggiornamento = excluded.date_aggiornamento,
-      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
-      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
-      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
-      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
-      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
-      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
-      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
-  `;
-
-  await env.DB_SOGLIE.prepare(query).bind(
-    campionato, dataOggi,
-    soglie["1"], soglie["X"], soglie["2"], soglie["gg"], soglie["ng"],
-    soglie["u05"], soglie["o05"], soglie["u15"], soglie["o15"], soglie["u25"], soglie["o25"],
-    soglie["u35"], soglie["o35"], soglie["u45"], soglie["o45"],
-    soglie["sg0"], soglie["sg1"], soglie["sg2"], soglie["sg3"], soglie["sg4"], soglie["sg5"], soglie["sg6p"]
-  ).run();
-}
-
-async function cacheCalibrazioneGiornaliera(campionato, dataCalibrazione, calibrazione, env) {
-  const payload = {
-    campionato,
-    date_calibrazione: dataCalibrazione,
-    finestra_giorni: calibrazione.finestra_giorni,
-    raggio_smussamento: calibrazione.raggio_smussamento,
-    penale_applicata: calibrazione.penale_applicata,
-    ...calibrazione.soglie
-  };
-  const stmt = preparaQuerySalvataggioCache(payload, env);
-  await stmt.run();
-}
-
+// CORRETTO: Sostituito stroke_u15 con soglia_u15 per allineamento D1
 function preparaQuerySalvataggioCache(d, env) {
   const query = `
     INSERT INTO calibrazioni_giornaliere (
@@ -638,13 +597,6 @@ function preparaQuerySalvataggioCache(d, env) {
     d.soglia_u35, d.soglia_o35, d.soglia_u45, d.soglia_o45,
     d.soglia_sg0, d.soglia_sg1, d.soglia_sg2, d.soglia_sg3, d.soglia_sg4, d.soglia_sg5, d.soglia_sg6p
   );
-}
-
-// CORRETTO: CARICA CACHE CALIBRAZIONI CON LA FIRMA UNIFICATA
-async function caricaCacheCalibrazioni(campionato, env) {
-  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
-  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
-  return results;
 }
 
 function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
@@ -677,50 +629,23 @@ function ottieniDataOggiYMD() {
   return year + "-" + month + "-" + day;
 }
 
-function inizializzaStrutturaReport() {
-  const report = {};
-  for (const m of LISTA_MERCATI) {
-    report[m] = { scommesseConsigliate: 0, scommesseVinte: 0 };
+function valutaMatchRispettoAlleSoglie(match, soglie, report) {
+  const esitiInCorso = calcolaMappaEsitiReali(match.fthg, match.ftag);
+
+  for (const mercato of LISTA_MERCATI) {
+    const prob = match[`prob_${mercato}`];
+    const sogliaValore = soglie[`soglia_${mercato}`];
+
+    if (prob !== undefined && prob !== null && sogliaValore !== undefined && sogliaValore !== null) {
+      const limiteDecimale = sogliaValore / 100.0;
+      if (prob >= limiteDecimale) {
+        report[mercato].scommesseConsigliate++;
+        if (esitiInCorso[mercato] === 1) {
+          report[mercato].scommesseVinte++;
+        }
+      }
+    }
   }
-  return report;
-}
-
-function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCalcolate, reportMercati) {
-  const mercatiDettaglio = {};
-  let totaleConsigliateGlobali = 0;
-  let totaleVinteGlobali = 0;
-
-  for (const m of LISTA_MERCATI) {
-    const dati = reportMercati[m];
-    const precisione = dati.scommesseConsigliate > 0 
-      ? Number(((dati.scommesseVinte / dati.scommesseConsigliate) * 100).toFixed(2)) 
-      : 0;
-
-    mercatiDettaglio[m] = {
-      consigliate: dati.scommesseConsigliate,
-      vinte: dati.scommesseVinte,
-      precisione_percentuale: precisione
-    };
-
-    totaleConsigliateGlobali += dati.scommesseConsigliate;
-    totaleVinteGlobali += dati.scommesseVinte;
-  }
-
-  const precisioneGlobale = totaleConsigliateGlobali > 0 
-    ? Number(((totaleVinteGlobali / totaleConsigliateGlobali) * 100).toFixed(2)) 
-    : 0;
-
-  return {
-    campionato,
-    partite_analizzate: totalePartite,
-    giornate_simulate: totaleGiornateCalcolate,
-    riepilogo_generale: {
-      totale_consigliate: totaleConsigliateGlobali,
-      totale_vinte: totaleVinteGlobali,
-      precisione_media: precisioneGlobale
-    },
-    esiti: mercatiDettaglio
-  };
 }
 
 // ==========================================
@@ -1204,9 +1129,16 @@ function ottieniHTMLDashboardEngineCompleto() {
                     }
                 };
 
-                // GESTIONE DIAGNOSTICA ATTIVA IN CASO DI ERRORE DI CONNESSIONE
+                // GESTIONE DIAGNOSTICA COMPLETA SENZA CHIUSURE SILENZIOSE
                 connection.onerror = async function() {
                     connection.close();
+                    
+                    // Se l'elaborazione è stata già memorizzata dal thread complete prima dell'error, usciamo lisci
+                    if (backtestResults[campionato]) {
+                        resolve();
+                        return;
+                    }
+
                     aggiungiLog("Inizio recupero dettagli errore di connessione streaming per: " + campionato, "warning");
                     
                     document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
@@ -1222,12 +1154,12 @@ function ottieniHTMLDashboardEngineCompleto() {
                             aggiungiLog("STREAMING KO (" + campionato + "): " + msgErrore, "error");
                             alert("✖ ERRORE DI ELABORAZIONE (" + campionato + ")\\n\\n" + msgErrore);
                         } else {
-                            aggiungiLog("STREAMING KO (" + campionato + "): Connessione chiusa senza dati dal server.", "error");
-                            alert("✖ ERRORE DI CONNESSIONE STREAMING (" + campionato + ")\\n\\nConnessione chiusa senza dati.");
+                            aggiungiLog("STREAMING KO (" + campionato + "): Connessione chiusa prima della trasmissione dati.", "error");
+                            alert("✖ ERRORE DI CONNESSIONE STREAMING (" + campionato + ")\\n\\nLa chiamata è stata interrotta senza restituire dati.");
                         }
                     } catch (e) {
-                        aggiungiLog("STREAMING KO (" + campionato + "): Errore di rete.", "error");
-                        alert("✖ ERRORE DI RETE (" + campionato + ")\\n\\nImpossibile raggiungere il server.");
+                        aggiungiLog("STREAMING KO (" + campionato + "): Errore di connessione.", "error");
+                        alert("✖ ERRORE DI RETE (" + campionato + ")\\n\\nImpossibile connettersi al Worker.");
                     }
                     resolve();
                 };
