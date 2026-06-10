@@ -1,5 +1,5 @@
 /**
- * CLOUDFLARE WORKER: GOLDBET SOGLIE (AMOLED ENGINE APPNATIV)
+ * CLOUDFLARE WORKER: GOLDBET SOGLIE (AMOLED ENGINE APPNATIVE)
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
  * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
@@ -491,10 +491,62 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 // METODI INTERFACCIAMENTO D1 DATABASE
 // ==========================================
 
-async function caricaCacheCalibrazioni(campionato, env) {
-  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
-  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
+async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
+  const dataInizio = calcolaDataMenoGiorni(dataRiferimento, giorniIndietro);
+  const query = `
+    SELECT * FROM validazione_risultati 
+    WHERE campionato = ? 
+      AND date >= ? 
+      AND date < ?
+      AND fthg IS NOT NULL 
+      AND ftag IS NOT NULL
+    ORDER BY date ASC;
+  `;
+  const { results } = await env.DB_PRONOSTICI.prepare(query).bind(campionato, dataInizio, dataRiferimento).all();
   return results;
+}
+
+async function salvaSogliaAttiva(campionato, dataOggi, soglie, env) {
+  const query = `
+    INSERT INTO soglie_attive (
+      campionato, date_aggiornamento,
+      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
+      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
+      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
+      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ) ON CONFLICT(campionato) DO UPDATE SET
+      date_aggiornamento = excluded.date_aggiornamento,
+      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
+      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
+      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
+      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
+      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
+      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
+      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
+  `;
+
+  await env.DB_SOGLIE.prepare(query).bind(
+    campionato, dataOggi,
+    soglie["1"], soglie["X"], soglie["2"], soglie["gg"], soglie["ng"],
+    soglie["u05"], soglie["o05"], soglie["u15"], soglie["o15"], soglie["u25"], soglie["o25"],
+    soglie["u35"], soglie["o35"], soglie["u45"], soglie["o45"],
+    soglie["sg0"], soglie["sg1"], soglie["sg2"], soglie["sg3"], soglie["sg4"], soglie["sg5"], soglie["sg6p"]
+  ).run();
+}
+
+async function cacheCalibrazioneGiornaliera(campionato, dataCalibrazione, calibrazione, env) {
+  const payload = {
+    campionato,
+    date_calibrazione: dataCalibrazione,
+    finestra_giorni: calibrazione.finestra_giorni,
+    raggio_smussamento: calibrazione.raggio_smussamento,
+    penale_applicata: calibrazione.penale_applicata,
+    ...calibrazione.soglie
+  };
+  const stmt = preparaQuerySalvataggioCache(payload, env);
+  await stmt.run();
 }
 
 function preparaQuerySalvataggioCache(d, env) {
@@ -513,7 +565,7 @@ function preparaQuerySalvataggioCache(d, env) {
       penale_applicata=excluded.penale_applicata,
       soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
       soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
-      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
+      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, stroke_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
       soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
       soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
       soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
@@ -526,6 +578,69 @@ function preparaQuerySalvataggioCache(d, env) {
     d.soglia_u35, d.soglia_o35, d.soglia_u45, d.soglia_o45,
     d.soglia_sg0, d.soglia_sg1, d.soglia_sg2, d.soglia_sg3, d.soglia_sg4, d.soglia_sg5, d.soglia_sg6p
   );
+}
+
+async function caricaCacheCalibrazioni(campionato, env) {
+  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
+  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
+  return results;
+}
+
+function valutaMatchRispettoAlleSoglie(match, soglie, report) {
+  const esitiInCorso = calcolaMappaEsitiReali(match.fthg, match.ftag);
+
+  for (const mercato of LISTA_MERCATI) {
+    const prob = match[`prob_${mercato}`];
+    const sogliaValore = soglie[`soglia_${mercato}`];
+
+    if (prob !== undefined && prob !== null && sogliaValore !== undefined && sogliaValore !== null) {
+      const limiteDecimale = sogliaValore / 100.0;
+      if (prob >= limiteDecimale) {
+        report[mercato].scommesseConsigliate++;
+        if (esitiInCorso[mercato] === 1) {
+          report[mercato].scommesseVinte++;
+        }
+      }
+    }
+  }
+}
+
+function ottieniDataOggiYMD() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function calcolaDataMenoGiorni(dataRiferimentoYMD, giorni) {
+  const d = new Date(dataRiferimentoYMD);
+  d.setDate(d.getDate() - giorni);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
+  if (dateUniche.length === 0) return -1;
+  const primaDataAssoluta = dateUniche[0];
+
+  for (let i = 0; i < dateUniche.length; i++) {
+    const differenzaGiorni = (new Date(dateUniche[i]) - new Date(primaDataAssoluta)) / (1000 * 60 * 60 * 24);
+    if (differenzaGiorni >= giorniMinimi) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function inizializzaStrutturaReport() {
+  const report = {};
+  for (const m of LISTA_MERCATI) {
+    report[m] = { scommesseConsigliate: 0, scommesseVinte: 0 };
+  }
+  return report;
 }
 
 // ==========================================
