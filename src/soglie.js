@@ -1,218 +1,6 @@
-/**
- * CLOUDFLARE WORKER: GOLDBET SOGLIE (AMOLED ENGINE APPNATIVE)
- * 
- * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
- * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
- */
-
-export default {
-  async fetch(request, env, ctx) {
-    try {
-      const url = new URL(request.url);
-      const path = url.pathname;
-
-      // 1. FRONTEND: Pagina Unica AMOLED Black Dashboard
-      if (path === "/" || path === "/index.html") {
-        return new Response(ottieniHTMLDashboardEngineCompleto(), {
-          status: 200,
-          headers: { "Content-Type": "text/html;charset=UTF-8" }
-        });
-      }
-
-      // 2. DIAGNOSTICA: Controllo integrità database e tabelle all'avvio
-      if (path === "/api/diagnostica") {
-        try {
-          if (!env.DB_PRONOSTICI) {
-            return responseJSON({ status: "ERRORE", messaggio: "Binding DB_PRONOSTICI mancante nel wrangler.toml" }, 500);
-          }
-          if (!env.DB_SOGLIE) {
-            return responseJSON({ status: "ERRORE", messaggio: "Binding DB_SOGLIE mancante nel wrangler.toml" }, 500);
-          }
-
-          const testPronostici = await env.DB_PRONOSTICI.prepare("SELECT COUNT(*) as c FROM validazione_risultati;").first();
-          const testSoglie = await env.DB_SOGLIE.prepare("SELECT COUNT(*) as c FROM soglie_attive;").first();
-          
-          if (testPronostici !== null && testSoglie !== null) {
-            return responseJSON({ status: "OK", messaggio: "Database sincronizzati correttamente" });
-          }
-          return responseJSON({ status: "ERRORE", messaggio: "Le tabelle richieste non sono state create nel database." }, 500);
-        } catch (err) {
-          return responseJSON({ status: "ERRORE", messaggio: err.message }, 500);
-        }
-      }
-
-      // 3. API: Estrazione dei campionati, metadati e data ultima elaborazione globale (Ottimizzata)
-      if (path === "/api/campionati") {
-        try {
-          if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
-            return responseJSON({ error: "Configurazione dei database incompleta nel file wrangler.toml." }, 500);
-          }
-
-          // Estrazione data ultima elaborazione globale
-          let ultimaElaborazioneGlobale = "-";
-          try {
-            const queryUltimaGlobale = `SELECT MAX(date_aggiornamento) as ultima_globale FROM soglie_attive;`;
-            const rUltima = await env.DB_SOGLIE.prepare(queryUltimaGlobale).first();
-            if (rUltima && rUltima.ultima_globale) {
-              ultimaElaborazioneGlobale = rUltima.ultima_globale;
-            }
-          } catch (e) {
-            ultimaElaborazioneGlobale = "-";
-          }
-
-          const queryDati = `
-            SELECT campionato, MAX(date) as ultima_data, COUNT(*) as totale_match 
-            FROM validazione_risultati 
-            WHERE campionato IS NOT NULL 
-            GROUP BY campionato 
-            ORDER BY campionato ASC;
-          `;
-          const { results: d1Results } = await env.DB_PRONOSTICI.prepare(queryDati).all();
-
-          const querySoglie = `SELECT campionato, date_aggiornamento FROM soglie_attive;`;
-          const { results: soglieResults } = await env.DB_SOGLIE.prepare(querySoglie).all();
-
-          const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
-
-          // Caricamento selettivo dei dati minimi per l'ultimo match
-          const dettagliMatchCompleti = [];
-          for (const r of d1Results) {
-            const queryUltimoMatch = `
-              SELECT date, home_team, away_team, fthg, ftag 
-              FROM validazione_risultati 
-              WHERE campionato = ? AND date = ? 
-              LIMIT 1;
-            `;
-            const m = await env.DB_PRONOSTICI.prepare(queryUltimoMatch).bind(r.campionato, r.ultima_data).first();
-            dettagliMatchCompleti.push({
-              campionato: r.campionato,
-              date: m ? m.date : r.ultima_data,
-              home: m ? m.home_team : "-",
-              away: m ? m.away_team : "-",
-              fthg: m ? m.fthg : 0,
-              ftag: m ? m.ftag : 0
-            });
-          }
-
-          const mappaDettagliMatch = new Map(dettagliMatchCompleti.map(d => [d.campionato, d]));
-
-          const listaCampionati = d1Results.map(r => {
-            const dataSoglia = mappaSoglie.get(r.campionato);
-            const mDettaglio = mappaDettagliMatch.get(r.campionato);
-            return {
-              campionato: r.campionato,
-              totale_match: r.totale_match,
-              aggiornato: dataSoglia ? 1 : 0,
-              data_aggiornamento: dataSoglia || "-",
-              ultimo_match_data: mDettaglio ? mDettaglio.date : "-",
-              ultimo_match_home: mDettaglio ? mDettaglio.home : "-",
-              ultimo_match_away: mDettaglio ? mDettaglio.away : "-",
-              ultimo_match_fthg: mDettaglio ? mDettaglio.fthg : 0,
-              ultimo_match_ftag: mDettaglio ? mDettaglio.ftag : 0
-            };
-          });
-
-          return responseJSON({
-            campionati: listaCampionati,
-            ultima_elaborazione_globale: ultimaElaborazioneGlobale
-          });
-        } catch (err) {
-          return responseJSON({ error: err.message }, 500);
-        }
-      }
-
-      // 4. API: Estrazione di tutte le soglie calcolate (per la tab Soglie Live)
-      if (path === "/api/tutte-soglie") {
-        try {
-          const query = `SELECT * FROM soglie_attive ORDER BY campionato ASC;`;
-          const { results } = await env.DB_SOGLIE.prepare(query).all();
-          return responseJSON(results);
-        } catch (err) {
-          return responseJSON({ error: err.message }, 500);
-        }
-      }
-
-      // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match con tracciamento dati estesi (OTTIMIZZATO RAM)
-      if (path === "/backtest") {
-        const campionato = url.searchParams.get("campionato");
-        if (!campionato) {
-          return responseJSON({ error: "Parametro 'campionato' mancante" }, 400);
-        }
-
-        // PRE-FLIGHT CHECK SINCRO: Verifichiamo la presenza di tabelle e colonne prima di avviare lo streaming!
-        try {
-          if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
-            return responseJSON({ error: "Configurazione database incompleta o binding mancanti nel wrangler.toml" }, 500);
-          }
-          // Test di lettura limitato dal database pronostici
-          await env.DB_PRONOSTICI.prepare("SELECT date, home_team, away_team FROM validazione_risultati WHERE campionato = ? LIMIT 1;").bind(campionato).first();
-          // Test di lettura dal database soglie
-          await env.DB_SOGLIE.prepare("SELECT * FROM calibrazioni_giornaliere LIMIT 1;").first();
-        } catch (dbErr) {
-          return responseJSON({ error: "ERRORE DI CONFIGURAZIONE INTERNA D1: " + dbErr.message }, 500);
-        }
-
-        const { readable, writable } = new TransformStream();
-        const writer = writable.getWriter();
-        const encoder = new TextEncoder();
-
-        ctx.waitUntil((async () => {
-          try {
-            await eseguiBacktestInStreaming(campionato, env, writer, encoder);
-          } catch (err) {
-            const errorMsg = JSON.stringify({ type: "error", message: err.message });
-            await writer.write(encoder.encode(`data: ${errorMsg}\n\n`));
-          } finally {
-            await writer.close();
-          }
-        })());
-
-        return new Response(readable, {
-          headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
-      }
-
-      // 6. API: Calibrazione live forzata di tutti i campionati
-      if (path === "/run-live") {
-        ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
-        return responseJSON({ status: "Calibrazione live programmata ed avviata in background." });
-      }
-
-      return responseJSON({ error: "Endpoint non trovato." }, 404);
-
-    } catch (error) {
-      return responseJSON({ error: error.message }, 500);
-    }
-  },
-
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
-  }
-};
-
 // ==========================================
-// FUNZIONI DI TRASMISSIONE E SUPPORTO
+// COSTANTI E CONFIGURAZIONI GLOBALI
 // ==========================================
-
-function responseJSON(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
-    }
-  });
-}
-
-// ==========================================
-// ALGORITMO DI BACKTEST & STREAMING (SSE)
-// ==========================================
-
 const LISTA_MERCATI = [
   "1", "X", "2", "gg", "ng",
   "u05", "o05", "u15", "o15", "u25", "o25", "u35", "o35", "u45", "o45",
@@ -223,29 +11,398 @@ const PARAM_FINESTRE = [365, 500, 730, 1000];
 const PARAM_RAGGI = [1, 2, 3];
 const PARAM_PENALITA = [4, 6, 8, 10, 12, 14];
 
-async function eseguiCalibrazioneLiveTuttiCampionati(env) {
-  const queryCampionati = `SELECT DISTINCT campionato FROM validazione_risultati WHERE campionato IS NOT NULL;`;
-  const { results } = await env.DB_PRONOSTICI.prepare(queryCampionati).all();
-  const oggiYMD = ottieniDataOggiYMD();
+// ==========================================
+// FUNZIONI DI ASSISTENZA MATEMATICA E TEMPO
+// ==========================================
 
-  for (const row of results) {
-    const campionato = row.campionato;
-    try {
-      const partiteStoriche = await caricaPartiteStoriche(campionato, oggiYMD, 1000, env);
-      if (partiteStoriche.length < 50) continue;
-
-      const calibrazioneOttimale = calibraInMemoria(partiteStoriche);
-
-      await salvaSogliaAttiva(campionato, oggiYMD, calibrazioneOttimale.soglie, env);
-      await cacheCalibrazioneGiornaliera(campionato, oggiYMD, calibrazioneOttimale, env);
-    } catch (err) {
-      console.error(`Errore nel live di ${campionato}:`, err);
-    }
-  }
+function formattaDataMMDDYYYY(dataStr) {
+  if (!dataStr || dataStr === "-") return "-";
+  const parti = dataStr.split("-");
+  if (parti.length !== 3) return dataStr;
+  return parti[1] + "-" + parti[2] + "-" + parti[0]; // Restituisce MM-DD-YYYY
 }
 
+function ottieniDataOggiYMD() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
+}
+
+function calcolaDataMenoGiorni(dataRiferimentoYMD, giorni) {
+  const d = new Date(dataRiferimentoYMD);
+  d.setDate(d.getDate() - giorni);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
+}
+
+function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
+  if (dateUniche.length === 0) return -1;
+  const primaDataAssoluta = dateUniche[0];
+
+  for (let i = 0; i < dateUniche.length; i++) {
+    const differenzaGiorni = (new Date(dateUniche[i]) - new Date(primaDataAssoluta)) / (1000 * 60 * 60 * 24);
+    if (differenzaGiorni >= giorniMinimi) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function calcolaMappaEsitiReali(fthg, ftag) {
+  const sum = fthg + ftag;
+  const gg = (fthg > 0 && ftag > 0) ? 1 : 0;
+  return {
+    "1": fthg > ftag ? 1 : 0,
+    "X": fthg === ftag ? 1 : 0,
+    "2": fthg < ftag ? 1 : 0,
+    "gg": gg,
+    "ng": gg === 1 ? 0 : 1,
+    "u05": sum < 0.5 ? 1 : 0,
+    "o05": sum > 0.5 ? 1 : 0,
+    "u15": sum < 1.5 ? 1 : 0,
+    "o15": sum > 1.5 ? 1 : 0,
+    "u25": sum < 2.5 ? 1 : 0,
+    "o25": sum > 2.5 ? 1 : 0,
+    "u35": sum < 3.5 ? 1 : 0,
+    "o35": sum > 3.5 ? 1 : 0,
+    "u45": sum < 4.5 ? 1 : 0,
+    "o45": sum > 4.5 ? 1 : 0,
+    "sg0": sum === 0 ? 1 : 0,
+    "sg1": sum === 1 ? 1 : 0,
+    "sg2": sum === 2 ? 1 : 0,
+    "sg3": sum === 3 ? 1 : 0,
+    "sg4": sum === 4 ? 1 : 0,
+    "sg5": sum === 5 ? 1 : 0,
+    "sg6p": sum >= 6 ? 1 : 0
+  };
+}
+
+function calcolaBrierScorePerMercato(matchList, mercato) {
+  let sommaErroriQuadratici = 0;
+  let conteggio = 0;
+
+  for (const m of matchList) {
+    const prob = m[`prob_${mercato}`];
+    const reale = m.esitiReali[mercato];
+
+    if (prob !== undefined && prob !== null && reale !== undefined) {
+      const errore = prob - reale;
+      sommaErroriQuadratici += errore * errore;
+      conteggio++;
+    }
+  }
+
+  return conteggio > 0 ? (sommaErroriQuadratici / conteggio) : 1.0;
+}
+
+function trovaMiglioreSogliaSmussata(matchList, mercato, raggio) {
+  const precisioniSoglie = {};
+
+  for (let t = 40; t <= 85; t++) {
+    let scommesseConsigliate = 0;
+    let scommesseVinte = 0;
+    const sogliaDecimale = t / 100.0;
+
+    for (const m of matchList) {
+      const prob = m[`prob_${mercato}`];
+      if (prob !== undefined && prob !== null && prob >= sogliaDecimale) {
+        scommesseConsigliate++;
+        if (m.esitiReali[mercato] === 1) {
+          scommesseVinte++;
+        }
+      }
+    }
+
+    precisioniSoglie[t] = scommesseConsigliate >= 5 ? (scommesseVinte / scommesseConsigliate) : 0.0;
+  }
+
+  let miglioreSogliaStandard = 65;
+  let mediaVicinatoMigliore = -1;
+
+  for (let t = 45; t <= 80; t++) {
+    let sommaPrecisioni = 0;
+    let divisore = 0;
+
+    for (let offset = -raggio; offset <= raggio; offset++) {
+      const tVicino = t + offset;
+      if (precisioniSoglie[tVicino] !== undefined) {
+        sommaPrecisioni += precisioniSoglie[tVicino];
+        divisore++;
+      }
+    }
+
+    const mediaVicinato = divisore > 0 ? (sommaPrecisioni / divisore) : 0;
+
+    if (mediaVicinato > mediaVicinatoMigliore) {
+      mediaVicinatoMigliore = mediaVicinato;
+      miglioreSogliaStandard = t;
+    }
+  }
+
+  return miglioreSogliaStandard;
+}
+
+function valutaPrecisioneSogliaSuCampione(matchList, mercato, valoreSoglia) {
+  let consigliate = 0;
+  let vinte = 0;
+  const sogliaDecimale = valoreSoglia / 100.0;
+
+  for (const m of matchList) {
+    const prob = m[`prob_${mercato}`];
+    if (prob !== undefined && prob !== null && prob >= sogliaDecimale) {
+      consigliate++;
+      if (m.esitiReali[mercato] === 1) {
+        vinte++;
+      }
+    }
+  }
+
+  return consigliate >= 3 ? (vinte / consigliate) : null;
+}
+
+function calibraInMemoria(partiteStoriche) {
+  let migliorConfigurazione = {
+    finestra_giorni: 1000,
+    raggio_smussamento: 2,
+    penale_applicata: 6,
+    punteggio_ottimalita: -1,
+    soglie: {}
+  };
+
+  const partiteConEsito = partiteStoriche.map(m => ({
+    ...m,
+    esitiReali: calcolaMappaEsitiReali(m.fthg, m.ftag)
+  }));
+
+  for (const finestra of PARAM_FINESTRE) {
+    const dataLimite = calcolaDataMenoGiorni(partiteConEsito[partiteConEsito.length - 1].date, finestra);
+    
+    // OTTIMIZZATO: Confronto diretto di stringhe
+    const matchFiltrati = partiteConEsito.filter(m => m.date >= dataLimite);
+
+    if (matchFiltrati.length < 30) continue;
+
+    for (const raggio of PARAM_RAGGI) {
+      for (const penale of PARAM_PENALITA) {
+        const soglieCalcolate = {};
+        let sommaPrecisioniSoglie = 0;
+        let conteggioMercatiValidi = 0;
+
+        for (const mercato of LISTA_MERCATI) {
+          const bs = calcolaBrierScorePerMercato(matchFiltrati, mercato);
+          let semaforo = "VERDE";
+
+          if (bs >= 0.72) {
+            semaforo = "ROSSO";
+          } else if (bs >= 0.68) {
+            semaforo = "GIALLO";
+          }
+
+          if (semaforo === "ROSSO") {
+            soglieCalcolate[mercato] = 100.0;
+          } else {
+            const sogliaStandard = trovaMiglioreSogliaSmussata(matchFiltrati, mercato, raggio);
+            let sogliaAttiva = sogliaStandard;
+
+            if (semaforo === "GIALLO") {
+              sogliaAttiva = Math.min(100.0, sogliaStandard + penale);
+            }
+            soglieCalcolate[mercato] = sogliaAttiva;
+
+            const accuratezzaSoglia = valutaPrecisioneSogliaSuCampione(matchFiltrati, mercato, sogliaAttiva);
+            if (accuratezzaSoglia !== null) {
+              sommaPrecisioniSoglie += accuratezzaSoglia;
+              conteggioMercatiValidi++;
+            }
+          }
+        }
+
+        const punteggioAttuale = conteggioMercatiValidi > 0 ? (sommaPrecisioniSoglie / conteggioMercatiValidi) : 0;
+
+        if (punteggioAttuale > migliorConfigurazione.punteggio_ottimalita) {
+          migliorConfigurazione = {
+            finestra_giorni: finestra,
+            raggio_smussamento: raggio,
+            penale_applicata: penale,
+            punteggio_ottimalita: punteggioAttuale,
+            soglie: soglieCalcolate
+          };
+        }
+      }
+    }
+  }
+
+  if (migliorConfigurazione.punteggio_ottimalita === -1) {
+    const defaultSoglie = {};
+    for (const m of LISTA_MERCATI) defaultSoglie[m] = 70.0;
+    migliorConfigurazione.soglie = defaultSoglie;
+  }
+
+  return {
+    finestra_giorni: migliorConfigurazione.finestra_giorni,
+    raggio_smussamento: migliorConfigurazione.raggio_smussamento,
+    penale_applicata: migliorConfigurazione.penale_applicata,
+    soglie: migliorConfigurazione.soglie
+  };
+}
+
+function inizializzaStrutturaReport() {
+  const report = {};
+  for (const m of LISTA_MERCATI) {
+    report[m] = { scommesseConsigliate: 0, scommesseVinte: 0 };
+  }
+  return report;
+}
+
+function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCalcolate, reportMercati) {
+  const mercatiDettaglio = {};
+  let totaleConsigliateGlobali = 0;
+  let totaleVinteGlobali = 0;
+
+  for (const m of LISTA_MERCATI) {
+    const dati = reportMercati[m];
+    const precisione = dati.scommesseConsigliate > 0 
+      ? Number(((dati.scommesseVinte / dati.scommesseConsigliate) * 100).toFixed(2)) 
+      : 0;
+
+    mercatiDettaglio[m] = {
+      consigliate: dati.scommesseConsigliate,
+      vinte: dati.scommesseVinte,
+      precisione_percentuale: precisione
+    };
+
+    totaleConsigliateGlobali += dati.scommesseConsigliate;
+    totaleVinteGlobali += dati.scommesseVinte;
+  }
+
+  const precisioneGlobale = totaleConsigliateGlobali > 0 
+    ? Number(((totaleVinteGlobali / totaleConsigliateGlobali) * 100).toFixed(2)) 
+    : 0;
+
+  return {
+    campionato,
+    partite_analizzate: totalePartite,
+    giornate_simulate: totaleGiornateCalcolate,
+    riepilogo_generale: {
+      totale_consigliate: totaleConsigliateGlobali,
+      totale_vinte: totaleVinteGlobali,
+      precisione_media: precisioneGlobale
+    },
+    esiti: mercatiDettaglio
+  };
+}
+
+// ==========================================
+// METODI INTERFACCIAMENTO D1 DATABASE
+// ==========================================
+
+async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
+  const dataInizio = calcolaDataMenoGiorni(dataRiferimento, giorniIndietro);
+  const query = `
+    SELECT * FROM validazione_risultati 
+    WHERE campionato = ? 
+      AND date >= ? 
+      AND date < ?
+      AND fthg IS NOT NULL 
+      AND ftag IS NOT NULL
+    ORDER BY date ASC;
+  `;
+  const { results } = await env.DB_PRONOSTICI.prepare(query).bind(campionato, dataInizio, dataRiferimento).all();
+  return results;
+}
+
+async function salvaSogliaAttiva(campionato, dataOggi, soglie, env) {
+  const query = `
+    INSERT INTO soglie_attive (
+      campionato, date_aggiornamento,
+      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
+      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
+      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
+      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ) ON CONFLICT(campionato) DO UPDATE SET
+      date_aggiornamento = excluded.date_aggiornamento,
+      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
+      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
+      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
+      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
+      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
+      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
+      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
+  `;
+
+  await env.DB_SOGLIE.prepare(query).bind(
+    campionato, dataOggi,
+    soglie["1"], soglie["X"], soglie["2"], soglie["gg"], soglie["ng"],
+    soglie["u05"], soglie["o05"], soglie["u15"], soglie["o15"], soglie["u25"], soglie["o25"],
+    soglie["u35"], soglie["o35"], soglie["u45"], soglie["o45"],
+    soglie["sg0"], soglie["sg1"], soglie["sg2"], soglie["sg3"], soglie["sg4"], soglie["sg5"], soglie["sg6p"]
+  ).run();
+}
+
+async function cacheCalibrazioneGiornaliera(campionato, dataCalibrazione, calibrazione, env) {
+  const payload = {
+    campionato,
+    date_calibrazione: dataCalibrazione,
+    finestra_giorni: calibrazione.finestra_giorni,
+    raggio_smussamento: calibrazione.raggio_smussamento,
+    penale_applicata: calibrazione.penale_applicata,
+    ...calibrazione.soglie
+  };
+  const stmt = preparaQuerySalvataggioCache(payload, env);
+  await stmt.run();
+}
+
+// CORRETTO: Sostituito stroke_u15 con soglia_u15 per allineamento D1
+function preparaQuerySalvataggioCache(d, env) {
+  const query = `
+    INSERT INTO calibrazioni_giornaliere (
+      campionato, date_calibrazione, finestra_giorni, raggio_smussamento, penale_applicata,
+      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
+      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
+      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
+      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ) ON CONFLICT(campionato, date_calibrazione) DO UPDATE SET
+      finestra_giorni=excluded.finestra_giorni,
+      raggio_smussamento=excluded.raggio_smussamento,
+      penale_applicata=excluded.penale_applicata,
+      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
+      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
+      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
+      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
+      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
+      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
+      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
+  `;
+  return env.DB_SOGLIE.prepare(query).bind(
+    d.campionato, d.date_calibrazione, d.finestra_giorni, d.raggio_smussamento, d.penale_applicata,
+    d.soglia_1, d.soglia_X, d.soglia_2, d.soglia_gg, d.soglia_ng,
+    d.soglia_u05, d.soglia_o05, d.soglia_u15, d.soglia_o15, d.soglia_u25, d.soglia_o25,
+    d.soglia_u35, d.soglia_o35, d.soglia_u45, d.soglia_o45,
+    d.soglia_sg0, d.soglia_sg1, d.soglia_sg2, d.soglia_sg3, d.soglia_sg4, d.soglia_sg5, d.soglia_sg6p
+  );
+}
+
+// CORRETTO E COERENTE: CHIAMATO SEMPRE CON "caricaCacheCalibrazioni"
+async function caricaCacheCalibrazioni(campionato, env) {
+  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
+  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
+  return results;
+}
+
+// ==========================================
+// ALGORITMO DI BACKTEST & STREAMING (SSE)
+// ==========================================
+
 async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
-  // OTTIMIZZATO: Escludiamo i campi superflui caricando solo le colonne matematiche e i dati essenziali
+  // OTTIMIZZATO RAM: Carichiamo solo ed esclusivamente le colonne necessarie alle operazioni matematiche
   const queryTuttiMatch = `
     SELECT date, home_team, away_team, fthg, ftag,
            prob_1, prob_X, prob_2, prob_gg, prob_ng,
@@ -264,7 +421,7 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
     return;
   }
 
-  // Caricamento della cache delle calibrazioni
+  // FIRMA ALLINEATA SENZA RISCHI DI RIFERIMENTO INESISTENTE
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
   const mappaCache = new Map(cacheCalibrazioni.map(c => [c.date_calibrazione, c]));
 
@@ -357,295 +514,6 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
   });
 
   await writer.write(encoder.encode(`data: ${chunkFinale}\n\n`));
-}
-
-function calibraInMemoria(partiteStoriche) {
-  let migliorConfigurazione = {
-    finestra_giorni: 1000,
-    raggio_smussamento: 2,
-    penale_applicata: 6,
-    punteggio_ottimalita: -1,
-    soglie: {}
-  };
-
-  const partiteConEsito = partiteStoriche.map(m => ({
-    ...m,
-    esitiReali: calcolaMappaEsitiReali(m.fthg, m.ftag)
-  }));
-
-  for (const finestra of PARAM_FINESTRE) {
-    const dataLimite = calcolaDataMenoGiorni(partiteConEsito[partiteConEsito.length - 1].date, finestra);
-    
-    // OTTIMIZZATO: Confronto diretto di stringhe
-    const matchFiltrati = partiteConEsito.filter(m => m.date >= dataLimite);
-
-    if (matchFiltrati.length < 30) continue;
-
-    for (const raggio of PARAM_RAGGI) {
-      for (const penale of PARAM_PENALITA) {
-        const soglieCalcolate = {};
-        let sommaPrecisioniSoglie = 0;
-        let conteggioMercatiValidi = 0;
-
-        for (const mercato of LISTA_MERCATI) {
-          const bs = calcolaBrierScorePerMercato(matchFiltrati, mercato);
-          let semaforo = "VERDE";
-
-          if (bs >= 0.72) {
-            semaforo = "ROSSO";
-          } else if (bs >= 0.68) {
-            semaforo = "GIALLO";
-          }
-
-          if (semaforo === "ROSSO") {
-            soglieCalcolate[mercato] = 100.0;
-          } else {
-            const sogliaStandard = trovaMiglioreSogliaSmussata(matchFiltrati, mercato, raggio);
-            let sogliaAttiva = sogliaStandard;
-
-            if (semaforo === "GIALLO") {
-              sogliaAttiva = Math.min(100.0, sogliaStandard + penale);
-            }
-            soglieCalcolate[mercato] = sogliaAttiva;
-
-            const accuratezzaSoglia = valutaPrecisioneSogliaSuCampione(matchFiltrati, mercato, sogliaAttiva);
-            if (accuratezzaSoglia !== null) {
-              sommaPrecisioniSoglie += accuratezzaSoglia;
-              conteggioMercatiValidi++;
-            }
-          }
-        }
-
-        const punteggioAttuale = conteggioMercatiValidi > 0 ? (sommaPrecisioniSoglie / conteggioMercatiValidi) : 0;
-
-        if (punteggioAttuale > migliorConfigurazione.punteggio_ottimalita) {
-          migliorConfigurazione = {
-            finestra_giorni: finestra,
-            raggio_smussamento: raggio,
-            penale_applicata: penale,
-            punteggio_ottimalita: punteggioAttuale,
-            soglie: soglieCalcolate
-          };
-        }
-      }
-    }
-  }
-
-  if (migliorConfigurazione.punteggio_ottimalita === -1) {
-    const defaultSoglie = {};
-    for (const m of LISTA_MERCATI) defaultSoglie[m] = 70.0;
-    migliorConfigurazione.soglie = defaultSoglie;
-  }
-
-  return {
-    finestra_giorni: migliorConfigurazione.finestra_giorni,
-    raggio_smussamento: migliorConfigurazione.raggio_smussamento,
-    penale_applicata: migliorConfigurazione.penale_applicata,
-    soglie: migliorConfigurazione.soglie
-  };
-}
-
-function calcolaBrierScorePerMercato(matchList, mercato) {
-  let sommaErroriQuadratici = 0;
-  let conteggio = 0;
-
-  for (const m of matchList) {
-    const prob = m[`prob_${mercato}`];
-    const reale = m.esitiReali[mercato];
-
-    if (prob !== undefined && prob !== null && reale !== undefined) {
-      const errore = prob - reale;
-      sommaErroriQuadratici += errore * errore;
-      conteggio++;
-    }
-  }
-
-  return conteggio > 0 ? (sommaErroriQuadratici / conteggio) : 1.0;
-}
-
-function trovaMiglioreSogliaSmussata(matchList, mercato, raggio) {
-  const precisioniSoglie = {};
-
-  for (let t = 40; t <= 85; t++) {
-    let scommesseConsigliate = 0;
-    let scommesseVinte = 0;
-    const sogliaDecimale = t / 100.0;
-
-    for (const m of matchList) {
-      const prob = m[`prob_${mercato}`];
-      if (prob !== undefined && prob !== null && prob >= sogliaDecimale) {
-        scommesseConsigliate++;
-        if (m.esitiReali[mercato] === 1) {
-          scommesseVinte++;
-        }
-      }
-    }
-
-    precisioniSoglie[t] = scommesseConsigliate >= 5 ? (scommesseVinte / scommesseConsigliate) : 0.0;
-  }
-
-  let miglioreSogliaStandard = 65;
-  let mediaVicinatoMigliore = -1;
-
-  for (let t = 45; t <= 80; t++) {
-    let sommaPrecisioni = 0;
-    let divisore = 0;
-
-    for (let offset = -raggio; offset <= raggio; offset++) {
-      const tVicino = t + offset;
-      if (precisioniSoglie[tVicino] !== undefined) {
-        sommaPrecisioni += precisioniSoglie[tVicino];
-        divisore++;
-      }
-    }
-
-    const mediaVicinato = divisore > 0 ? (sommaPrecisioni / divisore) : 0;
-
-    if (mediaVicinato > mediaVicinatoMigliore) {
-      mediaVicinatoMigliore = mediaVicinato;
-      miglioreSogliaStandard = t;
-    }
-  }
-
-  return miglioreSogliaStandard;
-}
-
-function valutaPrecisioneSogliaSuCampione(matchList, mercato, valoreSoglia) {
-  let consigliate = 0;
-  let vinte = 0;
-  const sogliaDecimale = valoreSoglia / 100.0;
-
-  for (const m of matchList) {
-    const prob = m[`prob_${mercato}`];
-    if (prob !== undefined && prob !== null && prob >= sogliaDecimale) {
-      consigliate++;
-      if (m.esitiReali[mercato] === 1) {
-        vinte++;
-      }
-    }
-  }
-
-  return consigliate >= 3 ? (vinte / consigliate) : null;
-}
-
-function calcolaMappaEsitiReali(fthg, ftag) {
-  const sum = fthg + ftag;
-  const gg = (fthg > 0 && ftag > 0) ? 1 : 0;
-  return {
-    "1": fthg > ftag ? 1 : 0,
-    "X": fthg === ftag ? 1 : 0,
-    "2": fthg < ftag ? 1 : 0,
-    "gg": gg,
-    "ng": gg === 1 ? 0 : 1,
-    "u05": sum < 0.5 ? 1 : 0,
-    "o05": sum > 0.5 ? 1 : 0,
-    "u15": sum < 1.5 ? 1 : 0,
-    "o15": sum > 1.5 ? 1 : 0,
-    "u25": sum < 2.5 ? 1 : 0,
-    "o25": sum > 2.5 ? 1 : 0,
-    "u35": sum < 3.5 ? 1 : 0,
-    "o35": sum > 3.5 ? 1 : 0,
-    "u45": sum < 4.5 ? 1 : 0,
-    "o45": sum > 4.5 ? 1 : 0,
-    "sg0": sum === 0 ? 1 : 0,
-    "sg1": sum === 1 ? 1 : 0,
-    "sg2": sum === 2 ? 1 : 0,
-    "sg3": sum === 3 ? 1 : 0,
-    "sg4": sum === 4 ? 1 : 0,
-    "sg5": sum === 5 ? 1 : 0,
-    "sg6p": sum >= 6 ? 1 : 0
-  };
-}
-
-// ==========================================
-// FUNZIONI DI ASSISTENZA MATEMATICA E TEMPO
-// ==========================================
-
-async function caricaCacheCalibrazioni(campionato, env) {
-  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
-  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
-  return results;
-}
-
-// CORRETTO: Sostituito stroke_u15 con soglia_u15 per allineamento D1
-function preparaQuerySalvataggioCache(d, env) {
-  const query = `
-    INSERT INTO calibrazioni_giornaliere (
-      campionato, date_calibrazione, finestra_giorni, raggio_smussamento, penale_applicata,
-      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
-      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
-      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
-      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    ) ON CONFLICT(campionato, date_calibrazione) DO UPDATE SET
-      finestra_giorni=excluded.finestra_giorni,
-      raggio_smussamento=excluded.raggio_smussamento,
-      penale_applicata=excluded.penale_applicata,
-      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
-      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
-      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
-      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
-      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
-      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
-      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
-  `;
-  return env.DB_SOGLIE.prepare(query).bind(
-    d.campionato, d.date_calibrazione, d.finestra_giorni, d.raggio_smussamento, d.penale_applicata,
-    d.soglia_1, d.soglia_X, d.soglia_2, d.soglia_gg, d.soglia_ng,
-    d.soglia_u05, d.soglia_o05, d.soglia_u15, d.soglia_o15, d.soglia_u25, d.soglia_o25,
-    d.soglia_u35, d.soglia_o35, d.soglia_u45, d.soglia_o45,
-    d.soglia_sg0, d.soglia_sg1, d.soglia_sg2, d.soglia_sg3, d.soglia_sg4, d.soglia_sg5, d.soglia_sg6p
-  );
-}
-
-function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
-  if (dateUniche.length === 0) return -1;
-  const primaDataAssoluta = dateUniche[0];
-
-  for (let i = 0; i < dateUniche.length; i++) {
-    const differenzaGiorni = (new Date(dateUniche[i]) - new Date(primaDataAssoluta)) / (1000 * 60 * 60 * 24);
-    if (differenzaGiorni >= giorniMinimi) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function calcolaDataMenoGiorni(dataRiferimentoYMD, giorni) {
-  const d = new Date(dataRiferimentoYMD);
-  d.setDate(d.getDate() - giorni);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return year + "-" + month + "-" + day;
-}
-
-function ottieniDataOggiYMD() {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return year + "-" + month + "-" + day;
-}
-
-function valutaMatchRispettoAlleSoglie(match, soglie, report) {
-  const esitiInCorso = calcolaMappaEsitiReali(match.fthg, match.ftag);
-
-  for (const mercato of LISTA_MERCATI) {
-    const prob = match[`prob_${mercato}`];
-    const sogliaValore = soglie[`soglia_${mercato}`];
-
-    if (prob !== undefined && prob !== null && sogliaValore !== undefined && sogliaValore !== null) {
-      const limiteDecimale = sogliaValore / 100.0;
-      if (prob >= limiteDecimale) {
-        report[mercato].scommesseConsigliate++;
-        if (esitiInCorso[mercato] === 1) {
-          report[mercato].scommesseVinte++;
-        }
-      }
-    }
-  }
 }
 
 // ==========================================
