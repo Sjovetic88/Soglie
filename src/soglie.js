@@ -149,7 +149,7 @@ export default {
           // Test di lettura dal database soglie
           await env.DB_SOGLIE.prepare("SELECT * FROM calibrazioni_giornaliere LIMIT 1;").first();
         } catch (dbErr) {
-          return responseJSON({ error: "ERRORE DI COMPILAZIONE DATABASE D1: " + dbErr.message }, 500);
+          return responseJSON({ error: "ERRORE DI CONFIGURAZIONE INTERNA D1: " + dbErr.message }, 500);
         }
 
         const { readable, writable } = new TransformStream();
@@ -258,7 +258,7 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
     return;
   }
 
-  // FIRMA ALLINEATA SENZA REFUSI
+  // FIRMA PERFETTAMENTE CORRETTA E SINCERATA ALLINEATA
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
   const mappaCache = new Map(cacheCalibrazioni.map(c => [c.date_calibrazione, c]));
 
@@ -640,7 +640,7 @@ function preparaQuerySalvataggioCache(d, env) {
   );
 }
 
-// FIRMA DEFINTIVAMENTE CORRETTA SENZA REFUSI
+// CORRETTO: CARICA CACHE CALIBRAZIONI CON LA FIRMA UNIFICATA
 async function caricaCacheCalibrazioni(campionato, env) {
   const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
   const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
@@ -796,6 +796,17 @@ function ottieniHTMLDashboardEngineCompleto() {
             <div id="lista-campionati-container" class="space-y-3">
                 <div class="py-12 text-center text-zinc-600 animate-pulse text-xs uppercase tracking-widest">Caricamento in corso...</div>
             </div>
+
+            <!-- CONSOLE LOG STRUMENTALE PROVVISORIA PER LA DIAGNOSTICA IN TEMPO REALE -->
+            <div class="amoled-card rounded-xl p-4 border border-zinc-800 bg-[#050505] mt-6">
+                <div class="flex justify-between items-center mb-2 pb-2 border-b border-zinc-900 shrink-0">
+                    <span class="text-[9px] font-black uppercase tracking-widest text-cyan-400">Console Log Diagnostica</span>
+                    <button onclick="pulisciConsoleLog()" class="text-[8px] text-zinc-600 hover:text-white uppercase font-bold tracking-wider">Cancella</button>
+                </div>
+                <div id="console-log-box" class="h-28 overflow-y-auto font-mono text-[9px] text-zinc-500 space-y-1 no-scrollbar scroll-smooth">
+                    <div>[SYSTEM] Inizializzazione console di tracciamento...</div>
+                </div>
+            </div>
         </div>
 
         <!-- TAB 2: SOGLIE LIVE GLOBALI (SFOGLIATORE FISARMONICA) -->
@@ -867,15 +878,42 @@ function ottieniHTMLDashboardEngineCompleto() {
         let isNitroModeAttiva = false; // Stato della Nitro Mode parallela
 
         window.addEventListener('DOMContentLoaded', () => {
+            aggiungiLog("Inizializzazione Goldbet Soglie Dashboard...", "info");
             eseguiDiagnosticaIniziale();
             caricaCampionatiHome();
             caricaSoglieLiveFisarmonica();
         });
 
+        // FUNZIONE DEDICATA PER IL LOG STRUMENTALE IN TEMPO REALE
+        function aggiungiLog(msg, tipo) {
+            const box = document.getElementById('console-log-box');
+            if (!box) return;
+            const now = new Date();
+            const timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
+            
+            const div = document.createElement('div');
+            let colorClass = 'text-zinc-500';
+            if (tipo === 'success') colorClass = 'text-emerald-400 font-bold';
+            if (tipo === 'error') colorClass = 'text-red-500 font-bold';
+            if (tipo === 'warning') colorClass = 'text-amber-500';
+            if (tipo === 'process') colorClass = 'text-cyan-400 animate-pulse';
+
+            div.className = colorClass;
+            div.innerHTML = '[' + timeStr + '] ' + msg;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight; // Auto scroll
+        }
+
+        function pulisciConsoleLog() {
+            const box = document.getElementById('console-log-box');
+            if (box) box.innerHTML = '<div>[SYSTEM] Console ripulita. In attesa di istruzioni...</div>';
+        }
+
         // 1. FUNZIONE DIAGNOSTICA PROATTIVA CON ACCENSIONE LED MINIMALE (8PX)
         async function eseguiDiagnosticaIniziale() {
             const led = document.getElementById('header-status-dot');
             const sub = document.getElementById('stat-allineamento-globale');
+            aggiungiLog("Verifica connessione D1 e integrità tabelle...", "info");
             try {
                 const res = await fetch('/api/diagnostica');
                 if (!res.ok) {
@@ -885,6 +923,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                 const diagnostica = await res.json();
                 if (diagnostica.status === "OK") {
                     led.className = "h-2 w-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_#10b981]";
+                    aggiungiLog("Diagnostica superata! Connessione database D1 stabile.", "success");
                 } else {
                     throw new Error(diagnostica.messaggio || "Errore sconosciuto");
                 }
@@ -900,11 +939,14 @@ function ottieniHTMLDashboardEngineCompleto() {
             led.className = "h-2 w-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_#ef4444]";
             sub.className = "text-[9px] text-red-500 font-bold uppercase tracking-widest mt-1 px-4";
             sub.textContent = "✖ ERRORE CONNESSIONE D1: " + msg.toUpperCase();
+            
+            aggiungiLog("DIAGNOSTICA KO: " + msg, "error");
         }
 
         // 2. RENDERING LISTA CAMPIONATI (HOME TAB)
         async function caricaCampionatiHome() {
             const container = document.getElementById('lista-campionati-container');
+            aggiungiLog("Estrazione campionati dal database pronostici...", "info");
             try {
                 const res = await fetch('/api/campionati');
                 if (!res.ok) {
@@ -921,6 +963,8 @@ function ottieniHTMLDashboardEngineCompleto() {
                 } else {
                     subHeader.textContent = "ULTIMA ELABORAZIONE: NESSUN DATO REGISTRATO";
                 }
+
+                aggiungiLog("Caricati " + campionati.length + " campionati attivi dal database.", "success");
 
                 container.innerHTML = '';
                 campionati.forEach(item => {
@@ -1002,6 +1046,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                         'ERRORE DI CARICAMENTO CAMPIONATI:<br>' +
                         '<span class="text-gray-400 text-[10px] lowercase font-normal block mt-2 px-4">' + err.message + '</span>' +
                     '</div>';
+                aggiungiLog("Caricamento campionati fallito: " + err.message, "error");
             }
         }
 
@@ -1019,10 +1064,12 @@ function ottieniHTMLDashboardEngineCompleto() {
                 campionatiSelezionati.push(campionato);
                 if (card) card.classList.add('glow-border');
                 if (indicator) indicator.classList.remove('hidden');
+                aggiungiLog("Selezionato campionato: " + campionato, "info");
             } else {
                 campionatiSelezionati.splice(idx, 1);
                 if (card) card.classList.remove('glow-border');
                 if (indicator) indicator.classList.add('hidden');
+                aggiungiLog("Deselezionato campionato: " + campionato, "warning");
             }
 
             aggiornaBottoneAvvioSoglie();
@@ -1053,9 +1100,11 @@ function ottieniHTMLDashboardEngineCompleto() {
             if (isNitroModeAttiva) {
                 txt.textContent = "Nitro On";
                 btn.className = "flex flex-col items-center justify-center w-14 h-12 text-orange-400 transition shadow-[0_0_12px_rgba(251,146,60,0.25)]";
+                aggiungiLog("Nitro Mode ATTIVATA. L'elaborazione avverrà in parallelo sui canali dedicati.", "warning");
             } else {
                 txt.textContent = "Nitro Off";
                 btn.className = "flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-orange-400 transition";
+                aggiungiLog("Nitro Mode disattivata. Elaborazione impostata in sequenziale.", "info");
             }
         }
 
@@ -1064,6 +1113,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             if (campionatiSelezionati.length === 0) return;
 
             const campionatiDaElaborare = [...campionatiSelezionati];
+            aggiungiLog("Avvio elaborazione per campionati: " + campionatiDaElaborare.join(', '), "process");
             
             // UI LOCK: impediamo click estranei durante il processo
             isProcessingInCorso = true;
@@ -1071,11 +1121,13 @@ function ottieniHTMLDashboardEngineCompleto() {
 
             if (isNitroModeAttiva) {
                 // VERA NITRO MODE: Calcolo asincrono di tutti i campionati in parallelo!
+                aggiungiLog("Invio richieste asincrone parallele di calcolo...", "process");
                 const promesseCalcolo = campionatiDaElaborare.map(camp => elaboraCampionatoInStreaming(camp));
                 await Promise.all(promesseCalcolo);
             } else {
                 // MODALITÀ STANDARD: Calcolo sequenziale (uno alla volta)
                 for (const camp of campionatiDaElaborare) {
+                    aggiungiLog("Avvio analisi sequenziale per: " + camp, "process");
                     await elaboraCampionatoInStreaming(camp);
                 }
             }
@@ -1085,11 +1137,13 @@ function ottieniHTMLDashboardEngineCompleto() {
             campionatiSelezionati = [];
             aggiornaBottoneAvvioSoglie();
             await caricaSoglieLiveFisarmonica(); // Rinfresca il visualizzatore globale
+            aggiungiLog("Elaborazione completata. Rilasciato lock sui controlli.", "success");
         }
 
         function elaboraCampionatoInStreaming(campionato) {
             return new Promise((resolve) => {
                 const idCamp = pulisciId(campionato);
+                aggiungiLog("Apertura canale streaming SSE per: " + campionato, "info");
                 
                 // Espande ed attiva la barra di progresso
                 document.getElementById('progresso-box-' + idCamp).classList.remove('hidden');
@@ -1112,11 +1166,16 @@ function ottieniHTMLDashboardEngineCompleto() {
                         const awayFmt = data.away.toUpperCase();
                         const scoreFmt = data.fthg + '-' + data.ftag;
                         
-                        document.getElementById('desc-' + idCamp).textContent = '📆 ' + dataFmt + ' | ' + homeFmt + ' - ' + awayFmt + ' ' + scoreFmt;
+                        const rigaCorrente = '📆 ' + dataFmt + ' | ' + homeFmt + ' - ' + awayFmt + ' ' + scoreFmt;
+                        document.getElementById('desc-' + idCamp).textContent = rigaCorrente;
+                        
+                        // Scriviamo l'avanzamento anche nella nostra console di log strumentale
+                        aggiungiLog("[" + campionato + "] Progresso: " + data.percentuale + "% (" + rigaCorrente + ")", "info");
                     } 
                     
                     else if (data.type === "complete") {
                         connection.close();
+                        aggiungiLog("Canale completato ed elaborato con successo per: " + campionato, "success");
                         
                         // Nascondi barra progresso, aggiorna badge in 100.0% e popola accordion interno
                         document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
@@ -1135,6 +1194,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                     
                     else if (data.type === "error") {
                         connection.close();
+                        aggiungiLog("ERRORE DI ELABORAZIONE SERVER (" + campionato + "): " + data.message, "error");
                         alert("ERRORE SUL SERVER: Il Worker ha riscontrato anomalie sul campionato " + campionato + "\\n\\nDettaglio: " + data.message);
                         document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                         
@@ -1147,8 +1207,9 @@ function ottieniHTMLDashboardEngineCompleto() {
                 // GESTIONE DIAGNOSTICA ATTIVA IN CASO DI ERRORE DI CONNESSIONE
                 connection.onerror = async function() {
                     connection.close();
-                    document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
+                    aggiungiLog("Inizio recupero dettagli errore di connessione streaming per: " + campionato, "warning");
                     
+                    document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                     const desc = document.getElementById('desc-' + idCamp);
                     desc.textContent = desc.dataset.original;
 
@@ -1157,11 +1218,15 @@ function ottieniHTMLDashboardEngineCompleto() {
                         const errRes = await fetch('/backtest?campionato=' + encodeURIComponent(campionato));
                         if (!errRes.ok) {
                             const errData = await errRes.json().catch(() => ({}));
-                            alert("✖ ERRORE DI ELABORAZIONE (" + campionato + ")\\n\\n" + (errData.error || "La connessione si è arrestata improvvisamente."));
+                            const msgErrore = errData.error || errData.message || "Errore sconosciuto.";
+                            aggiungiLog("STREAMING KO (" + campionato + "): " + msgErrore, "error");
+                            alert("✖ ERRORE DI ELABORAZIONE (" + campionato + ")\\n\\n" + msgErrore);
                         } else {
+                            aggiungiLog("STREAMING KO (" + campionato + "): Connessione chiusa senza dati dal server.", "error");
                             alert("✖ ERRORE DI CONNESSIONE STREAMING (" + campionato + ")\\n\\nConnessione chiusa senza dati.");
                         }
                     } catch (e) {
+                        aggiungiLog("STREAMING KO (" + campionato + "): Errore di rete.", "error");
                         alert("✖ ERRORE DI RETE (" + campionato + ")\\n\\nImpossibile raggiungere il server.");
                     }
                     resolve();
@@ -1210,6 +1275,7 @@ function ottieniHTMLDashboardEngineCompleto() {
         // 4. SEZIONE: SFOGLIATORE GLOBALE DELLE SOGLIE LIVE (TAB 2)
         async function caricaSoglieLiveFisarmonica() {
             const container = document.getElementById('soglie-accordions-container');
+            aggiungiLog("Lettura delle soglie attive da soglie_campionati...", "info");
             try {
                 const res = await fetch('/api/tutte-soglie');
                 if (!res.ok) {
@@ -1220,12 +1286,15 @@ function ottieniHTMLDashboardEngineCompleto() {
 
                 if (datiSoglieOperative.length === 0) {
                     container.innerHTML = '<div class="py-12 text-center text-zinc-600 text-xs font-black uppercase">Nessuna soglia calibrata presente nel database.</div>';
+                    aggiungiLog("Tabella soglie_attive vuota.", "warning");
                     return;
                 }
 
                 renderizzaAccordionSoglie(datiSoglieOperative);
+                aggiungiLog("Caricate " + datiSoglieOperative.length + " competizioni calibrate nella tab Soglie Live.", "success");
             } catch (err) {
                 container.innerHTML = '<div class="text-center py-10 text-red-500 text-xs font-bold uppercase">ERRORE CARICAMENTO SOGLIE:<br><span class="text-zinc-500 text-[10px] block mt-1 font-normal lowercase">' + err.message + '</span></div>';
+                aggiungiLog("Errore caricamento Soglie Live: " + err.message, "error");
             }
         }
 
@@ -1342,10 +1411,27 @@ function ottieniHTMLDashboardEngineCompleto() {
                 document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-14 h-12 text-cyan-400 transition";
                 caricaSoglieLiveFisarmonica();
             }
+            
+            aggiungiLog("Navigazione su sezione: " + tabNome.toUpperCase(), "info");
+        }
+
+        // Calibrazione nitro massiva in background
+        async function forzaCalibrazioneBackgroundCompleta() {
+            if (!confirm("Desideri lanciare la calibrazione 'NITRO' per tutti i campionati attivi? L'operazione avverrà in background.")) return;
+            try {
+                aggiungiLog("Invio comando nitro massivo a Cloudflare...", "warning");
+                const res = await fetch('/run-live');
+                alert("Processo Nitro avviato correttamente in background su Cloudflare.");
+                aggiungiLog("Nitro programmata correttamente sui Workers.", "success");
+            } catch (err) {
+                alert("Errore Nitro: " + err.message);
+                aggiungiLog("Fallimento avvio Nitro: " + err.message, "error");
+            }
         }
 
         // Reset completo della sessione
         function resetGeneraleEngine() {
+            aggiungiLog("Reset generale della sessione in corso...", "warning");
             if (currentSseConnection) currentSseConnection.close();
             campionatiSelezionati = [];
             backtestResults = {};
@@ -1373,6 +1459,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             });
 
             navigaTab('home');
+            aggiungiLog("Reset completato. Interfaccia ripristinata allo stato iniziale.", "success");
         }
 
         function formattaDataMMDDYYYY(dataStr) {
