@@ -1,5 +1,5 @@
 /**
- * CLOUDFLARE WORKER: SOGLIE & BACKTEST CON INTERFACCIA GRAFICA "ENGINE"
+ * CLOUDFLARE WORKER: GOLDBET SOGLIE (ENGINE & DASHBOARD)
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
  * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
@@ -11,7 +11,7 @@ export default {
       const url = new URL(request.url);
       const path = url.pathname;
 
-      // 1. INTERFACCIA GRAFICA: Dashboard AMOLED Black (Stile Engine App)
+      // 1. ENDPOINT: Dashboard HTML AMOLED Black
       if (path === "/" || path === "/index.html") {
         return new Response(ottieniHTMLDashboardEngine(), {
           status: 200,
@@ -19,54 +19,98 @@ export default {
         });
       }
 
-      // 2. API: Estrazione dei campionati per la tendina a comparsa
+      // 2. ENDPOINT: API per ottenere la lista dinamica dei campionati e i loro stati
       if (path === "/api/campionati") {
-        const query = `SELECT DISTINCT campionato FROM validazione_risultati WHERE campionato IS NOT NULL ORDER BY campionato ASC;`;
-        const { results } = await env.DB_PRONOSTICI.prepare(query).all();
-        const lista = results.map(r => r.campionato);
-        return responseJSON(lista);
+        // Estrae l'elenco e l'ultima data disponibile per ogni campionato
+        const queryDati = `
+          SELECT campionato, MAX(date) as ultima_data, COUNT(*) as totale_match 
+          FROM validazione_risultati 
+          WHERE campionato IS NOT NULL 
+          GROUP BY campionato 
+          ORDER BY campionato ASC;
+        `;
+        const { results: d1Results } = await env.DB_PRONOSTICI.prepare(queryDati).all();
+
+        // Legge le soglie già calcolate nel database delle soglie per mostrare se sono aggiornate
+        const querySoglie = `SELECT campionato, date_aggiornamento FROM soglie_attive;`;
+        const { results: soglieResults } = await env.DB_SOGLIE.prepare(querySoglie).all();
+
+        const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
+
+        const listaCampionati = d1Results.map(r => {
+          const dataSoglia = mappaSoglie.get(r.campionato);
+          return {
+            campionato: r.campionato,
+            ultima_partita: r.ultima_data,
+            totale_match: r.totale_match,
+            aggiornato: dataSoglia ? 1 : 0,
+            data_aggiornamento: dataSoglia || "-"
+          };
+        });
+
+        return responseJSON(listaCampionati);
       }
 
-      // 3. API: Lettura delle soglie operative attuali
-      if (path === "/api/soglie-attive") {
-        const campionato = url.searchParams.get("campionato");
-        if (!campionato) return responseJSON({ error: "Campionato mancante" }, 400);
-
-        const query = `SELECT * FROM soglie_attive WHERE campionato = ?;`;
-        const result = await env.DB_SOGLIE.prepare(query).bind(campionato).first();
-        return responseJSON(result || { messaggio: "Nessuna soglia attiva registrata." });
+      // 3. ENDPOINT: API per leggere le soglie attive di tutti i campionati
+      if (path === "/api/tutte-soglie") {
+        const query = `SELECT * FROM soglie_attive ORDER BY campionato ASC;`;
+        const { results } = await env.DB_SOGLIE.prepare(query).all();
+        return responseJSON(results);
       }
 
-      // 4. API: Esecuzione del Backtest Storico
+      // 4. ENDPOINT: API streaming per il Backtest in Tempo Reale (SSE)
       if (path === "/backtest") {
         const campionato = url.searchParams.get("campionato");
-        if (!campionato) return responseJSON({ error: "Parametro 'campionato' mancante" }, 400);
-        
-        const report = await eseguiBacktestStorico(campionato, env);
-        return responseJSON(report);
+        if (!campionato) {
+          return responseJSON({ error: "Parametro 'campionato' mancante" }, 400);
+        }
+
+        // Utilizziamo un canale SSE per inviare aggiornamenti progressivi al client
+        const { readable, writable } = new TransformStream();
+        const writer = writable.getWriter();
+        const encoder = new TextEncoder();
+
+        ctx.waitUntil((async () => {
+          try {
+            await eseguiBacktestInStreaming(campionato, env, writer, encoder);
+          } catch (err) {
+            const errorMsg = JSON.stringify({ type: "error", message: err.message });
+            await writer.write(encoder.encode(`data: ${errorMsg}\n\n`));
+          } finally {
+            await writer.close();
+          }
+        })());
+
+        return new Response(readable, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*"
+          }
+        });
       }
 
-      // 5. API: Ricalcolo Live di tutti i campionati
+      // 5. ENDPOINT: Ricalcolatore Live rapido
       if (path === "/run-live") {
         ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
-        return responseJSON({ status: "Calibrazione live avviata in background per tutti i campionati" });
+        return responseJSON({ status: "Calibrazione live pianificata in background." });
       }
 
       return responseJSON({ error: "Endpoint non trovato." }, 404);
 
     } catch (error) {
-      return responseJSON({ error: error.message, stack: error.stack }, 500);
+      return responseJSON({ error: error.message }, 500);
     }
   },
 
   async scheduled(event, env, ctx) {
-    console.log("Inizio calibrazione notturna pianificata...");
     ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
   }
 };
 
 // ==========================================
-// SUPPORTO RISPOSTE E UTILITY
+// UTILITY DI CONFIGURAZIONE E STRUTTURE
 // ==========================================
 
 function responseJSON(data, status = 200) {
@@ -80,13 +124,22 @@ function responseJSON(data, status = 200) {
 }
 
 // ==========================================
-// MOTORE MATEMATICO & DATABASE CALCOLI
+// MOTORE DI CALCOLO MATEMATICO & SSE STREAMING
 // ==========================================
+
+const LISTA_MERCATI = [
+  "1", "X", "2", "gg", "ng",
+  "u05", "o05", "u15", "o15", "u25", "o25", "u35", "o35", "u45", "o45",
+  "sg0", "sg1", "sg2", "sg3", "sg4", "sg5", "sg6p"
+];
+
+const PARAM_FINESTRE = [365, 500, 730, 1000];
+const PARAM_RAGGI = [1, 2, 3];
+const PARAM_PENALITA = [4, 6, 8, 10, 12, 14];
 
 async function eseguiCalibrazioneLiveTuttiCampionati(env) {
   const queryCampionati = `SELECT DISTINCT campionato FROM validazione_risultati WHERE campionato IS NOT NULL;`;
   const { results } = await env.DB_PRONOSTICI.prepare(queryCampionati).all();
-  
   const oggiYMD = ottieniDataOggiYMD();
 
   for (const row of results) {
@@ -105,7 +158,10 @@ async function eseguiCalibrazioneLiveTuttiCampionati(env) {
   }
 }
 
-async function eseguiBacktestStorico(campionato, env) {
+/**
+ * Esegue il backtest matematico trasmettendo i dati passo-passo via Server-Sent Events (SSE)
+ */
+async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
   const queryTuttiMatch = `
     SELECT * FROM validazione_risultati 
     WHERE campionato = ? AND date IS NOT NULL AND fthg IS NOT NULL AND ftag IS NOT NULL
@@ -114,9 +170,12 @@ async function eseguiBacktestStorico(campionato, env) {
   const { results: tuttiMatch } = await env.DB_PRONOSTICI.prepare(queryTuttiMatch).bind(campionato).all();
 
   if (tuttiMatch.length < 150) {
-    return { error: "Dati insufficienti per il backtest (servono almeno 150 match)." };
+    const msg = JSON.stringify({ type: "error", message: "Dati storici insufficienti per simulare questo campionato (servono almeno 150 match)." });
+    await writer.write(encoder.encode(`data: ${msg}\n\n`));
+    return;
   }
 
+  // Estrazione della cache delle calibrazioni dal database dedicato
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
   const mappaCache = new Map();
   for (const c of cacheCalibrazioni) {
@@ -125,15 +184,26 @@ async function eseguiBacktestStorico(campionato, env) {
 
   const reportMercati = inizializzaStrutturaReport();
   let totaleGiornateCalcolate = 0;
+  let matchesProcessati = 0;
+  const totaleMatchesDaSimulare = tuttiMatch.length;
   let queryBatchScrittura = [];
 
   const dateUniche = [...new Set(tuttiMatch.map(m => m.date))].sort();
   const primaDataSimulabileIdx = trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, 1000);
 
   if (primaDataSimulabileIdx === -1 || primaDataSimulabileIdx >= dateUniche.length) {
-    return { error: "Impossibile accumulare 1000 giorni di storico iniziale per la simulazione." };
+    const msg = JSON.stringify({ type: "error", message: "Dati insufficienti per strutturare i primi 1000 giorni di storico di calibrazione." });
+    await writer.write(encoder.encode(`data: ${msg}\n\n`));
+    return;
   }
 
+  // Incrementiamo l'indice iniziale nel conteggio dei match già considerati "storico iniziale statico"
+  for (let idx = 0; idx < primaDataSimulabileIdx; idx++) {
+    const matchesData = tuttiMatch.filter(m => m.date === dateUniche[idx]);
+    matchesProcessati += matchesData.length;
+  }
+
+  // Ciclo giorno per giorno in tempo reale
   for (let i = primaDataSimulabileIdx; i < dateUniche.length; i++) {
     const dataCorrente = dateUniche[i];
     let soglieGiornata = mappaCache.get(dataCorrente);
@@ -157,35 +227,48 @@ async function eseguiBacktestStorico(campionato, env) {
       }
     }
 
-    if (!soglieGiornata) continue;
-    totaleGiornateCalcolate++;
-
     const matchDelGiorno = tuttiMatch.filter(m => m.date === dataCorrente);
-    for (const match of matchDelGiorno) {
-      valutaMatchRispettoAlleSoglie(match, soglieGiornata, reportMercati);
+    
+    if (soglieGiornata) {
+      totaleGiornateCalcolate++;
+      for (const match of matchDelGiorno) {
+        valutaMatchRispettoAlleSoglie(match, soglieGiornata, reportMercati);
+      }
+    }
+
+    matchesProcessati += matchDelGiorno.length;
+
+    // Generiamo l'aggiornamento di progresso in diretta streaming per la Dashboard
+    if (matchDelGiorno.length > 0) {
+      const ultimoMatchStr = `${dataCorrente} | ${matchDelGiorno[0].home_team} - ${matchDelGiorno[0].away_team} ${matchDelGiorno[0].fthg}-${matchDelGiorno[0].ftag}`;
+      const percentualeStr = ((matchesProcessati / totaleMatchesDaSimulare) * 100).toFixed(1);
+      
+      const chunkProgresso = JSON.stringify({
+        type: "progress",
+        elaborati: matchesProcessati,
+        totale: totaleMatchesDaSimulare,
+        percentuale: percentualeStr,
+        ultimoMatch: ultimoMatchStr
+      });
+
+      await writer.write(encoder.encode(`data: ${chunkProgresso}\n\n`));
     }
   }
 
+  // Scrittura finale nel database dedicato delle calibrazioni trovate in background
   if (queryBatchScrittura.length > 0) {
     await env.DB_SOGLIE.batch(queryBatchScrittura);
   }
 
-  return generaRiepilogoFinalizzato(campionato, tuttiMatch.length, totaleGiornateCalcolate, reportMercati);
+  // Invio dei risultati finali al termine dello streaming
+  const reportRiepilogativo = generaRiepilogoFinalizzato(campionato, totaleMatchesDaSimulare, totaleGiornateCalcolate, reportMercati);
+  const chunkFinale = JSON.stringify({
+    type: "complete",
+    report: reportRiepilogativo
+  });
+
+  await writer.write(encoder.encode(`data: ${chunkFinale}\n\n`));
 }
-
-// ==========================================
-// LOGICA MATEMATICA CORE
-// ==========================================
-
-const LISTA_MERCATI = [
-  "1", "X", "2", "gg", "ng",
-  "u05", "o05", "u15", "o15", "u25", "o25", "u35", "o35", "u45", "o45",
-  "sg0", "sg1", "sg2", "sg3", "sg4", "sg5", "sg6p"
-];
-
-const PARAM_FINESTRE = [365, 500, 730, 1000];
-const PARAM_RAGGI = [1, 2, 3];
-const PARAM_PENALITA = [4, 6, 8, 10, 12, 14];
 
 function calibraInMemoria(partiteStoriche) {
   let migliorConfigurazione = {
@@ -384,7 +467,7 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 }
 
 // ==========================================
-// FUNZIONI DI GESTIONE DATI & DB
+// FUNZIONI DI GESTIONE DATI E FILE SYSTEM D1
 // ==========================================
 
 async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
@@ -482,25 +565,6 @@ async function caricaCacheCalibrazioni(campionato, env) {
   return results;
 }
 
-function valutaMatchRispettoAlleSoglie(match, soglie, report) {
-  const esitiInCorso = calcolaMappaEsitiReali(match.fthg, match.ftag);
-
-  for (const mercato of LISTA_MERCATI) {
-    const prob = match[`prob_${mercato}`];
-    const sogliaValore = soglie[`soglia_${mercato}`];
-
-    if (prob !== undefined && prob !== null && sogliaValore !== undefined && sogliaValore !== null) {
-      const limiteDecimale = sogliaValore / 100.0;
-      if (prob >= limiteDecimale) {
-        report[mercato].scommesseConsigliate++;
-        if (esitiInCorso[mercato] === 1) {
-          report[mercato].scommesseVinte++;
-        }
-      }
-    }
-  }
-}
-
 function ottieniDataOggiYMD() {
   const d = new Date();
   const year = d.getFullYear();
@@ -578,7 +642,7 @@ function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCal
 }
 
 // ==========================================
-// INTERFACCIA GRAFICA INTERATTIVA (AMOLED BLACK ENGINE)
+// INTERFACCIA GRAFICA INTEGRATA (GOLDBET SOGLIE)
 // ==========================================
 
 function ottieniHTMLDashboardEngine() {
@@ -588,7 +652,7 @@ function ottieniHTMLDashboardEngine() {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SOGLIE & BACKTEST ENGINE</title>
+    <title>GOLDBET SOGLIE</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
     <style>
@@ -598,104 +662,129 @@ function ottieniHTMLDashboardEngine() {
             color: #ffffff;
             -webkit-tap-highlight-color: transparent;
         }
-        /* AMOLED Card Design */
-        .engine-card {
+        .amoled-card {
             background-color: #0d0d0d;
-            border: 1px solid #1a1a1c;
+            border: 1px solid #1c1c1e;
         }
-        /* Neon text pulse effect */
-        .neon-accent {
+        .neon-cyan {
             color: #00e5ff;
             text-shadow: 0 0 10px rgba(0, 229, 255, 0.2);
         }
-        /* Bottom navigation shadow */
-        .bottom-dock {
+        .border-neon {
+            border-color: rgba(0, 229, 255, 0.4);
+            box-shadow: 0 0 10px rgba(0, 229, 255, 0.1);
+        }
+        .bottom-nav {
             background-color: #000000;
             border-top: 1px solid #1c1c1e;
         }
-        /* Hide scrollbars but keep functionality */
-        .no-scrollbar::-webkit-scrollbar {
-            display: none;
-        }
-        .no-scrollbar {
-            -ms-overflow-style: none;
-            scrollbar-width: none;
-        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
 </head>
 <body class="overflow-x-hidden min-h-screen pb-24">
 
-    <!-- CONTENITORE CENTRALE -->
-    <div class="max-w-md mx-auto px-4 pt-6">
-
-        <!-- INTESTAZIONE PRINCIPALE STILE APP GOLDBET -->
-        <header class="text-center mb-6">
-            <h1 class="text-2xl font-black uppercase tracking-wider mb-1">
-                SOGLIE <span class="neon-accent">ENGINE</span>
+    <!-- COMPONENTE SUPERIORE - MONITOR STATISTICHE REAL-TIME -->
+    <div class="sticky top-0 z-50 bg-black/90 backdrop-blur-md border-b border-zinc-900 py-4 px-4">
+        <div class="max-w-md mx-auto text-center">
+            <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5">
+                GOLDBET <span class="neon-cyan">SOGLIE</span>
             </h1>
-            <div id="stato-allineamento" class="text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-1">
-                SELEZIONA COMPETIZIONE PER INIZIARE
+            
+            <!-- CONTATORI DI AVANZAMENTO IN DIRETTA SSE -->
+            <div id="sse-progress-container" class="hidden my-2">
+                <div class="text-xs font-black text-white tracking-widest uppercase">
+                    <span id="sse-count-match">0 / 0</span> MATCHES | <span id="sse-percent" class="neon-cyan">0.0%</span>
+                </div>
+                <div class="text-[9px] text-gray-500 font-bold uppercase tracking-wider overflow-hidden text-ellipsis whitespace-nowrap mt-1 px-4" id="sse-current-match">
+                    INIZIALIZZAZIONE SIMULAZIONE IN MEMORIA...
+                </div>
             </div>
-            <div id="data-ultimo-calcolo" class="text-[10px] text-gray-400 font-semibold tracking-wider uppercase">
-                ULTIMA ELABORAZIONE: -
-            </div>
-        </header>
 
-        <!-- SEZIONE DEI 22 MERCATI (VISUALIZZATA IN DIRETTA) -->
-        <main class="space-y-2.5" id="contenuto-principale">
-            <!-- Messaggio di base prima della selezione -->
-            <div class="py-20 text-center text-gray-600">
-                <svg class="h-10 w-10 mx-auto text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                </svg>
-                <p class="text-xs font-bold uppercase tracking-wider">Nessun Campionato Selezionato</p>
-                <p class="text-[10px] text-gray-500 mt-1">Usa la barra inferiore [SELECT] per scegliere una lega.</p>
-            </div>
-        </main>
-
-    </div>
-
-    <!-- CASSETTO SELEZIONE CAMPIONATI (DRAWER SLIDE-UP) -->
-    <div id="drawer-campionati" class="fixed inset-y-0 inset-x-0 bg-black/80 backdrop-blur-sm z-50 transition-opacity duration-300 opacity-0 pointer-events-none">
-        <div class="absolute bottom-0 left-0 right-0 max-w-md mx-auto bg-[#0d0d0d] border-t border-zinc-800 rounded-t-3xl max-h-[80vh] flex flex-col transition-transform duration-300 translate-y-full">
-            <div class="p-4 border-b border-zinc-900 flex justify-between items-center shrink-0">
-                <span class="text-xs font-black uppercase text-gray-400 tracking-wider">Scegli Campionato</span>
-                <button onclick="chiudiDrawer()" class="text-gray-500 hover:text-white text-xs font-bold uppercase">Chiudi</button>
-            </div>
-            <div class="overflow-y-auto no-scrollbar p-3 space-y-1" id="drawer-lista-campionati">
-                <!-- Generato Dinamicamente -->
+            <!-- STATO DI BASE -->
+            <div id="home-static-stats" class="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
+                SISTEMA PRONTO PER L'ELABORAZIONE
             </div>
         </div>
     </div>
 
+    <!-- MAIN WRAPPER (MAX-WIDTH SMARTPHONE) -->
+    <div class="max-w-md mx-auto px-4 mt-4">
+
+        <!-- SEZIONE 1: HOME TAB (ELENCO CAMPIONATI) -->
+        <div id="tab-home" class="space-y-3">
+            <h2 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2 px-1">Seleziona Competizione Attiva</h2>
+            <div id="lista-campionati-container" class="space-y-2.5">
+                <div class="py-12 text-center text-zinc-600">Caricamento campionati in corso...</div>
+            </div>
+        </div>
+
+        <!-- SEZIONE 2: SOGLIE LIVE TAB (TUTTI GLI ESITI DI TUTTI I CAMPIONATI) -->
+        <div id="tab-soglie" class="hidden space-y-4">
+            <div class="flex justify-between items-center mb-1">
+                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-widest">Soglie Operative Live</h2>
+                <input type="text" id="filtro-soglie" oninput="filtraSoglieInDiretta()" placeholder="Cerca campionato..." class="bg-[#0d0d0d] border border-zinc-800 text-[10px] rounded-lg px-2 py-1 text-white focus:outline-none focus:border-cyan-400 w-1/2">
+            </div>
+            
+            <div id="soglie-globali-container" class="space-y-3">
+                <!-- Generato Dinamicamente tramite Fisarmonica (Accordion) -->
+                <div class="py-12 text-center text-zinc-600">Caricamento database soglie...</div>
+            </div>
+        </div>
+
+        <!-- SEZIONE 3: SCHERMATA DETTAGLIATA RISULTATI BACKTEST (DOPO L'AVVIO) -->
+        <div id="tab-risultati" class="hidden space-y-4">
+            <div class="flex items-center gap-3 border-b border-zinc-800 pb-3 justify-between">
+                <div>
+                    <h2 id="backtest-campionato-nome" class="text-lg font-black uppercase text-white">SERIE A</h2>
+                    <p class="text-[9px] text-zinc-500 uppercase font-bold">Resoconto simulato senza Look-Ahead Bias</p>
+                </div>
+                <button onclick="tornaAllaHome()" class="text-cyan-400 text-xs font-bold uppercase tracking-wider px-2 py-1 border border-cyan-400/20 rounded">Indietro</button>
+            </div>
+
+            <div class="grid grid-cols-3 gap-2 text-center">
+                <div class="bg-[#0d0d0d] p-3 rounded-xl border border-zinc-900">
+                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Match</span>
+                    <span id="res-partite" class="text-base font-black text-white">-</span>
+                </div>
+                <div class="bg-[#0d0d0d] p-3 rounded-xl border border-zinc-900">
+                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Consigliati</span>
+                    <span id="res-consigliate" class="text-base font-black text-teal-400">-</span>
+                </div>
+                <div class="bg-[#0d0d0d] p-3 rounded-xl border border-zinc-900">
+                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Precisione</span>
+                    <span id="res-precisione" class="text-base font-black text-cyan-400">-</span>
+                </div>
+            </div>
+
+            <div id="risultati-esiti-container" class="space-y-2">
+                <!-- Elenco dei 22 esiti simulati -->
+            </div>
+        </div>
+
+    </div>
+
     <!-- BARRA DI NAVIGAZIONE INFERIORE (BOTTOM DOCK) -->
-    <nav class="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-40 bottom-dock h-16 flex items-center justify-around px-2">
+    <nav class="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-40 bottom-nav h-16 flex items-center justify-around px-2">
         
-        <!-- SELECT BUTTON -->
-        <button onclick="apriDrawer()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-white transition">
+        <!-- HOME BUTTON -->
+        <button id="nav-btn-home" onclick="cambiaTab('home')" class="flex flex-col items-center justify-center w-16 h-12 text-cyan-400 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h3m-6 0a1 1 0 001-1v-4a1 1 0 00-1-1h-3a1 1 0 00-1 1v4a1 1 0 001 1m-6 0h6"></path>
             </svg>
-            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Select</span>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Home</span>
         </button>
 
-        <!-- PROCESS BUTTON -->
-        <button onclick="lanciaCalibrazioneLive()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-white transition">
+        <!-- SOGLIE LIVE BUTTON -->
+        <button id="nav-btn-soglie" onclick="cambiaTab('soglie')" class="flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
             </svg>
-            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Live</span>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Soglie Live</span>
         </button>
 
-        <!-- START (RUN BACKTEST) BUTTON -->
-        <button id="btn-start" onclick="eseguiBacktestEngine()" class="flex flex-col items-center justify-center w-14 h-14 bg-gradient-to-b from-[#121212] to-[#000] border border-[#1c1c1e] rounded-full text-zinc-400 hover:text-[#00e5ff] hover:border-[#00e5ff]/30 shadow-lg -translate-y-2 transition">
-            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
-            </svg>
-        </button>
-
-        <!-- NITRO BUTTON (BULK RUN) -->
-        <button onclick="lanciaNitroBulk()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-[#ff9100] transition">
+        <!-- NITRO BUTTON (MASS BACKGROUND RUN) -->
+        <button id="nav-btn-nitro" onclick="lanciaNitroBulk()" class="flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-orange-400 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
             </svg>
@@ -703,7 +792,7 @@ function ottieniHTMLDashboardEngine() {
         </button>
 
         <!-- RESET BUTTON -->
-        <button onclick="resetSchermata()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-red-500 transition">
+        <button onclick="eseguiResetGenerale()" class="flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-red-500 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
             </svg>
@@ -714,243 +803,334 @@ function ottieniHTMLDashboardEngine() {
 
     <!-- LOGICA DI FUNZIONAMENTO FRONTEND -->
     <script>
-        let campionatoSelezionato = "";
-        let listaCampionatiCached = [];
+        let campionatiCache = [];
+        let soglieCache = [];
+        let sseSource = null;
 
         window.addEventListener('DOMContentLoaded', async () => {
-            await scaricaCampionati();
+            await scaricaDatiIniziali();
         });
 
-        async function scaricaCampionati() {
+        async function scaricaDatiIniziali() {
+            await scaricaCampionatiHome();
+            await scaricaSoglieGlobali();
+        }
+
+        // 1. CARICAMENTO DATI PER LA SCHERMATA HOME
+        async function scaricaCampionatiHome() {
+            const container = document.getElementById('lista-campionati-container');
             try {
                 const res = await fetch('/api/campionati');
-                listaCampionatiCached = await res.json();
-                popolaDrawerCampionati();
-            } catch (err) {
-                console.error("Errore caricamento competizioni:", err);
-            }
-        }
-
-        function popolaDrawerCampionati() {
-            const container = document.getElementById('drawer-lista-campionati');
-            container.innerHTML = '';
-            listaCampionatiCached.forEach(c => {
-                const btn = document.createElement('button');
-                btn.className = "w-full text-left px-4 py-3 rounded-xl hover:bg-zinc-900 text-sm font-semibold transition text-gray-300 hover:text-white flex justify-between items-center border border-transparent hover:border-zinc-800";
-                btn.innerHTML = \`
-                    <span>\${c}</span>
-                    <span class="text-[10px] text-gray-600 uppercase tracking-widest font-black">Seleziona</span>
-                \`;
-                btn.onclick = () => selezionaCampionato(c);
-                container.appendChild(btn);
-            });
-        }
-
-        function apriDrawer() {
-            const drawer = document.getElementById('drawer-campionati');
-            const inner = drawer.querySelector('.absolute');
-            drawer.classList.remove('pointer-events-none', 'opacity-0');
-            drawer.classList.add('opacity-100');
-            inner.classList.remove('translate-y-full');
-            inner.classList.add('translate-y-0');
-        }
-
-        function chiudiDrawer() {
-            const drawer = document.getElementById('drawer-campionati');
-            const inner = drawer.querySelector('.absolute');
-            drawer.classList.remove('opacity-100');
-            drawer.classList.add('pointer-events-none', 'opacity-0');
-            inner.classList.remove('translate-y-0');
-            inner.classList.add('translate-y-full');
-        }
-
-        async function selezionaCampionato(c) {
-            campionatoSelezionato = c;
-            chiudiDrawer();
-
-            // Aggiorna intestazione
-            document.getElementById('stato-allineamento').textContent = c + " | IN ATTESA";
-            document.getElementById('stato-allineamento').className = "text-[10px] neon-accent font-bold uppercase tracking-widest mb-1";
-            
-            await caricaSoglieLiveEngine();
-        }
-
-        // Recupera le soglie operative di oggi e le renderizza in stile "Engine Card"
-        async function caricaSoglieLiveEngine() {
-            const container = document.getElementById('contenuto-principale');
-            container.innerHTML = \`
-                <div class="py-20 text-center animate-pulse text-zinc-500">
-                    <p class="text-xs font-bold uppercase tracking-widest">Caricamento in corso...</p>
-                </div>
-            \`;
-
-            try {
-                const res = await fetch(\`/api/soglie-attive?campionato=\${encodeURIComponent(campionatoSelezionato)}\`);
-                const dati = await res.json();
-
-                if (dati.messaggio || dati.error) {
-                    container.innerHTML = \`
-                        <div class="py-12 text-center text-amber-500/80 engine-card rounded-2xl p-6">
-                            <p class="text-xs font-bold uppercase tracking-wider">Nessun Dato Operativo</p>
-                            <p class="text-[10px] text-gray-500 mt-2">Le soglie odierne non sono ancora state calcolate. Usa il pulsante [LIVE] o [START] per avviare il motore.</p>
-                        </div>
-                    \`;
-                    return;
-                }
-
-                // Imposta l'ultimo calcolo
-                document.getElementById('data-ultimo-calcolo').textContent = "ULTIMA ELABORAZIONE: " + (dati.date_aggiornamento || "-");
-
-                container.innerHTML = '';
-                Object.keys(dati)
-                    .filter(key => key.startsWith('soglia_'))
-                    .forEach(key => {
-                        const mercatoNome = key.replace('soglia_', '').toUpperCase();
-                        const valore = dati[key];
-                        const bloccato = valore >= 100;
-
-                        const card = document.createElement('div');
-                        card.className = "engine-card rounded-xl p-4 flex justify-between items-center transition hover:border-[#00e5ff]/20";
-                        
-                        card.innerHTML = \`
-                            <div>
-                                <span class="text-xs font-black uppercase text-white">\${mercatoNome}</span>
-                                <span class="text-[9px] text-zinc-500 font-bold block mt-0.5 uppercase tracking-wider">📊 SOGLIA LIVE DI OGGI</span>
-                            </div>
-                            <div class="text-right">
-                                <span class="text-sm font-black tracking-wide \${bloccato ? 'text-red-500' : 'neon-accent'}">
-                                    \${bloccato ? 'BLOCKED' : valore.toFixed(1) + '%'}
-                                </span>
-                            </div>
-                        \`;
-                        container.appendChild(card);
-                    });
-
-            } catch (err) {
-                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE: \${err.message}</div>\`;
-            }
-        }
-
-        // Lancia la simulazione e popola i dati
-        async function eseguiBacktestEngine() {
-            if (!campionatoSelezionato) {
-                alert("Seleziona prima una competizione tramite il pulsante [SELECT]!");
-                return;
-            }
-
-            const btnStart = document.getElementById('btn-start');
-            const container = document.getElementById('contenuto-principale');
-            const stato = document.getElementById('stato-allineamento');
-
-            // Stato di caricamento
-            btnStart.classList.add('animate-pulse', 'text-[#00e5ff]', 'border-[#00e5ff]');
-            stato.textContent = campionatoSelezionato + " | SIMULAZIONE IN CORSO...";
-            
-            container.innerHTML = \`
-                <div class="py-20 text-center text-zinc-500">
-                    <svg class="animate-spin h-8 w-8 mx-auto text-[#00e5ff] mb-4" viewBox="0 0 24 24" fill="none">
-                        <circle class="opacity-10" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                        <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <p class="text-[10px] font-black uppercase tracking-widest text-zinc-400">Ricerca parametri su 72 scenari...</p>
-                    <p class="text-[9px] text-zinc-600 mt-1">Confronto dati in memoria senza bias</p>
-                </div>
-            \`;
-
-            try {
-                const res = await fetch(\`/backtest?campionato=\${encodeURIComponent(campionatoSelezionato)}\`);
-                const report = await res.json();
-
-                if (report.error) {
-                    alert(report.error);
-                    await caricaSoglieLiveEngine();
-                    return;
-                }
-
-                // Fine caricamento
-                stato.innerHTML = \`BACKTEST COMPLETATO | PRECISIONE: <span class="neon-accent font-black">\${report.riepilogo_generale.precisione_media}%</span>\`;
-
-                container.innerHTML = '';
+                campionatiCache = await res.json();
                 
-                // Generazione della lista dei 22 esiti identica allo screenshot
-                Object.keys(report.esiti).forEach(mercato => {
-                    const dati = report.esiti[mercato];
+                container.innerHTML = '';
+                campionatiCache.forEach(item => {
                     const card = document.createElement('div');
-                    card.className = "engine-card rounded-xl p-4 flex justify-between items-center hover:border-zinc-800 transition";
-
-                    // Impostiamo il colore di precisione in neon
-                    let colorePercentuale = "text-[#00e5ff]";
-                    if (dati.precisione_percentuale < 55) colorePercentuale = "text-red-500";
-                    else if (dati.precisione_percentuale < 70) colorePercentuale = "text-amber-500";
+                    card.id = \`card-\${item.campionato.replace(/\\s+/g, '-')}\`;
+                    card.className = "amoled-card rounded-xl p-4 transition duration-200 flex flex-col gap-3";
+                    
+                    // Colore badge di aggiornamento
+                    const badgeColore = item.aggiornato ? "text-cyan-400 bg-cyan-950/40" : "text-zinc-600 bg-zinc-950/40";
+                    const badgeTesto = item.aggiornato ? "CALIBRATO" : "IN ATTESA";
 
                     card.innerHTML = \`
-                        <div>
-                            <span class="text-xs font-black uppercase text-white tracking-wide">\${mercato.toUpperCase()}</span>
-                            <span class="text-[9px] text-zinc-500 font-bold block mt-0.5 uppercase tracking-wider">
-                                📅 \${report.giornate_simulate} GOR_SIM | SUGGERITI: \${dati.consigliate} - VINTE: \${dati.vinte}
-                            </span>
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <h3 class="text-sm font-black uppercase text-white tracking-wide">\${item.campionato}</h3>
+                                <p class="text-[9px] text-zinc-500 font-semibold uppercase tracking-wider mt-0.5">
+                                    Ultimo Match: \${item.ultima_partita || "-"} | Match: \${item.totale_match}
+                                </p>
+                            </div>
+                            <div class="text-right">
+                                <span class="text-[8px] font-black px-2 py-1 rounded \${badgeColore} tracking-widest uppercase">
+                                    \${badgeTesto}
+                                </span>
+                            </div>
                         </div>
-                        <div class="text-right">
-                            <span class="text-sm font-black tracking-wider \${colorePercentuale}">
-                                \${dati.precisione_percentuale.toFixed(1)}%
-                            </span>
+                        <div class="flex gap-2 mt-1">
+                            <button onclick="avviaMotoreBacktest('\${item.campionato}')" class="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 text-black font-black py-2 rounded-lg text-[10px] uppercase tracking-widest transition shadow-lg">
+                                Avvia Backtest
+                            </button>
+                            <button onclick="calibraLiveSingolo('\${item.campionato}')" class="px-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-[10px] font-black uppercase tracking-widest text-zinc-300">
+                                Calibra Live
+                            </button>
                         </div>
                     \`;
                     container.appendChild(card);
                 });
-
             } catch (err) {
-                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE BACKTEST: \${err.message}</div>\`;
-            } finally {
-                btnStart.classList.remove('animate-pulse', 'text-[#00e5ff]', 'border-[#00e5ff]');
+                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">Errore di comunicazione: \${err.message}</div>\`;
             }
         }
 
-        // Lancia calibrazione manuale
-        async function lanciaCalibrazioneLive() {
-            if (!campionatoSelezionato) {
-                alert("Seleziona prima un campionato!");
-                return;
-            }
-            if (!confirm("Avviare la calibrazione live e calcolare le soglie di oggi per " + campionatoSelezionato + "?")) return;
+        // 2. BACKTEST CON STREAMING REAL-TIME (SSE)
+        function avviaMotoreBacktest(campionato) {
+            // Selezioniamo visivamente la card per dare riscontro
+            const cardId = \`card-\${campionato.replace(/\\s+/g, '-')}\`;
+            const card = document.getElementById(cardId);
+            if (card) card.className = "amoled-card rounded-xl p-4 transition duration-200 border-neon";
 
+            // Attiviamo l'interfaccia streaming superiore
+            const sseContainer = document.getElementById('sse-progress-container');
+            const staticStats = document.getElementById('home-static-stats');
+            sseContainer.classList.remove('hidden');
+            staticStats.classList.add('hidden');
+
+            document.getElementById('sse-count-match').textContent = "0 / 0";
+            document.getElementById('sse-percent').textContent = "0.0%";
+            document.getElementById('sse-current-match').textContent = "AVVIO CANALE STREAMING WORKER...";
+
+            // Disattiviamo temporaneamente i bottoni per evitare richieste multiple
+            document.querySelectorAll('button').forEach(b => b.disabled = true);
+
+            // Apriamo la connessione SSE al Worker
+            if (sseSource) sseSource.close();
+            sseSource = new EventSource(\`/backtest?campionato=\${encodeURIComponent(campionato)}\`);
+
+            sseSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+
+                if (data.type === "progress") {
+                    document.getElementById('sse-count-match').textContent = \`\${data.elaborati} / \${data.totale}\`;
+                    document.getElementById('sse-percent').textContent = data.percentuale + "%";
+                    document.getElementById('sse-current-match').textContent = data.ultimoMatch.toUpperCase();
+                } 
+                
+                else if (data.type === "complete") {
+                    sseSource.close();
+                    finalizzaUIBacktest(data.report);
+                } 
+                
+                else if (data.type === "error") {
+                    sseSource.close();
+                    alert("Errore calcolo: " + data.message);
+                    ripristinaControlli();
+                }
+            };
+
+            sseSource.onerror = function() {
+                sseSource.close();
+                alert("Canale di streaming interrotto improvvisamente dal server.");
+                ripristinaControlli();
+            };
+        }
+
+        function finalizzaUIBacktest(report) {
+            ripristinaControlli();
+
+            // Nascondiamo l'SSE
+            document.getElementById('sse-progress-container').classList.add('hidden');
+            document.getElementById('home-static-stats').classList.remove('hidden');
+
+            // Cambiamo tab visualizzando i risultati di backtest
+            cambiaTab('risultati');
+
+            document.getElementById('backtest-campionato-nome').textContent = report.campionato;
+            document.getElementById('res-partite').textContent = report.partite_analizzate;
+            document.getElementById('res-consigliate').textContent = report.riepilogo_generale.totale_consigliate;
+            document.getElementById('res-precisione').textContent = report.riepilogo_generale.precisione_media + "%";
+
+            const container = document.getElementById('risultati-esiti-container');
+            container.innerHTML = '';
+
+            Object.keys(report.esiti).forEach(mercato => {
+                const dati = report.esiti[mercato];
+                const card = document.createElement('div');
+                card.className = "amoled-card rounded-xl p-3 flex justify-between items-center";
+
+                let coloreTesto = "text-[#00e5ff]";
+                if (dati.precisione_percentuale < 55) coloreTesto = "text-red-500";
+                else if (dati.precisione_percentuale < 70) coloreTesto = "text-amber-500";
+
+                card.innerHTML = \`
+                    <div>
+                        <span class="text-xs font-black uppercase text-white tracking-wide">\${mercato.toUpperCase()}</span>
+                        <span class="text-[8px] text-zinc-500 font-bold block mt-0.5">
+                            SUGGERITI: \${dati.consigliate} | VINTE: \${dati.vinte}
+                        </span>
+                    </div>
+                    <div class="text-right">
+                        <span class="text-sm font-black \${coloreTesto}">
+                            \${dati.precisione_percentuale.toFixed(1)}%
+                        </span>
+                    </div>
+                \`;
+                container.appendChild(card);
+            });
+        }
+
+        function ripristinaControlli() {
+            document.querySelectorAll('button').forEach(b => b.disabled = false);
+            campionatiCache.forEach(item => {
+                const cardId = \`card-\${item.campionato.replace(/\\s+/g, '-')}\`;
+                const card = document.getElementById(cardId);
+                if (card) card.className = "amoled-card rounded-xl p-4 transition duration-200 flex flex-col gap-3";
+            });
+        }
+
+        // 3. SEZIONE SOGLIE LIVE (FISARMONICA / ACCORDION COMPLETO)
+        async function scaricaSoglieGlobali() {
+            const container = document.getElementById('soglie-globali-container');
             try {
-                const res = await fetch('/run-live');
-                const dati = await res.json();
-                alert("Processo avviato! Tra circa 10 secondi aggiorna la pagina per visualizzare le nuove soglie.");
+                const res = await fetch('/api/tutte-soglie');
+                soglieCache = await res.json();
+
+                if (soglieCache.length === 0) {
+                    container.innerHTML = \`<div class="text-center py-10 text-zinc-500 text-xs font-bold uppercase">Nessuna soglia calcolata nel database.</div>\`;
+                    return;
+                }
+
+                costruisciFisarmonicaSoglie(soglieCache);
             } catch (err) {
-                alert("Errore nell'avvio della calibrazione: " + err.message);
+                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">Errore caricamento soglie: \${err.message}</div>\`;
             }
         }
 
-        // Lancia calibrazione massiva
+        function costruisciFisarmonicaSoglie(listaSoglie) {
+            const container = document.getElementById('soglie-globali-container');
+            container.innerHTML = '';
+
+            listaSoglie.forEach((item, index) => {
+                const wrapper = document.createElement('div');
+                wrapper.className = "amoled-card rounded-xl overflow-hidden item-soglia-filtro";
+                wrapper.dataset.campionato = item.campionato.toLowerCase();
+
+                // Esiti aggregati per visualizzazione rapida
+                wrapper.innerHTML = \`
+                    <!-- Intestazione cliccabile della fisarmonica -->
+                    <button onclick="toggleAccordion(\${index})" class="w-full text-left px-4 py-4 flex justify-between items-center hover:bg-zinc-950 transition">
+                        <div>
+                            <span class="text-xs font-black uppercase text-white tracking-wide">\${item.campionato}</span>
+                            <span class="text-[8px] text-zinc-500 font-bold block mt-0.5 uppercase tracking-widest">
+                                Aggiornato il: \${item.date_aggiornamento}
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-[8px] font-black text-cyan-400 bg-cyan-950/40 px-2 py-0.5 rounded tracking-widest">SFOGLIA</span>
+                            <svg id="arrow-\${index}" class="h-4 w-4 text-zinc-500 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                        </div>
+                    </button>
+                    
+                    <!-- Corpo espandibile con i 22 esiti -->
+                    <div id="body-\${index}" class="hidden p-4 border-t border-zinc-900 bg-black grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        \${costruisciGriglia22Soglie(item)}
+                    </div>
+                \`;
+                container.appendChild(wrapper);
+            });
+        }
+
+        function costruisciGriglia22Soglie(sogliaData) {
+            let html = '';
+            const mercatiNomi = Object.keys(sogliaData).filter(k => k.startsWith('soglia_'));
+
+            mercatiNomi.forEach(key => {
+                const nomeMercato = key.replace('soglia_', '').toUpperCase();
+                const valore = sogliaData[key];
+                const bloccato = valore >= 100;
+
+                html += \`
+                    <div class="bg-[#0a0a0b] p-2.5 rounded-lg border border-zinc-900 text-center">
+                        <div class="text-[8px] text-zinc-500 font-bold uppercase">\${nomeMercato}</div>
+                        <div class="text-xs font-black mt-1 \${bloccato ? 'text-red-500' : 'text-cyan-400'}">
+                            \${bloccato ? 'BLOCKED' : valore.toFixed(1) + '%'}
+                        </div>
+                    </div>
+                \`;
+            });
+            return html;
+        }
+
+        function toggleAccordion(index) {
+            const body = document.getElementById(\`body-\${index}\`);
+            const arrow = document.getElementById(\`arrow-\${index}\`);
+
+            if (body.classList.contains('hidden')) {
+                body.classList.remove('hidden');
+                body.classList.add('grid');
+                arrow.classList.add('rotate-180');
+            } else {
+                body.classList.add('hidden');
+                body.classList.remove('grid');
+                arrow.classList.remove('rotate-180');
+            }
+        }
+
+        function filtraSoglieInDiretta() {
+            const query = document.getElementById('filtro-soglie').value.toLowerCase();
+            const elementi = document.querySelectorAll('.item-soglia-filtro');
+
+            elementi.forEach(el => {
+                const nomeCamp = el.dataset.campionato;
+                if (nomeCamp.includes(query)) {
+                    el.classList.remove('hidden');
+                } else {
+                    el.classList.add('hidden');
+                }
+            });
+        }
+
+        // 4. NAVIGAZIONE INTERNA TRA TAB
+        function cambiaTab(tabNome) {
+            document.getElementById('tab-home').classList.add('hidden');
+            document.getElementById('tab-soglie').classList.add('hidden');
+            document.getElementById('tab-risultati').classList.add('hidden');
+
+            document.getElementById(\`tab-\${tabNome}\`).classList.remove('hidden');
+
+            // Reset visivo pulsanti menu
+            document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition";
+            document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition";
+            document.getElementById('nav-btn-nitro').className = "flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition";
+
+            if (tabNome === 'home') {
+                document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-16 h-12 text-cyan-400 transition";
+            } else if (tabNome === 'soglie') {
+                document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-16 h-12 text-cyan-400 transition";
+                scaricaSoglieGlobali(); // rinfresca il visualizzatore globale
+            }
+        }
+
+        function tornaAllaHome() {
+            cambiaTab('home');
+        }
+
+        // 5. CALIBRAZIONI LIVE INDIVIDUALI O GENERALI
+        async function calibraLiveSingolo(campionato) {
+            if (!confirm("Ricalcolare ora le soglie live giornaliere di: " + campionato + "?")) return;
+            try {
+                const res = await fetch(\`/run-live?campionato=\${encodeURIComponent(campionato)}\`);
+                alert("Processo pianificato. Tra qualche secondo aggiorna per vedere lo stato.");
+                await scaricaDatiIniziali();
+            } catch (err) {
+                alert("Errore: " + err.message);
+            }
+        }
+
         async function lanciaNitroBulk() {
-            if (!confirm("AVVERTENZA: Desideri forzare la ricalibrazione 'NITRO' in background per tutti i 34 campionati? Questa operazione rinfrescherà tutte le soglie.")) return;
+            if (!confirm("Ricalcolare le soglie live per tutti i campionati in background?")) return;
             try {
                 const res = await fetch('/run-live');
-                const dati = await res.json();
-                alert("Allineamento Nitro avviato! Le soglie verranno aggiornate in background nel database.");
+                alert("Nitro avviato con successo in background su Cloudflare.");
             } catch (err) {
-                alert("Errore nell'avvio Nitro: " + err.message);
+                alert("Errore Nitro: " + err.message);
             }
         }
 
-        function resetSchermata() {
-            campionatoSelezionato = "";
-            document.getElementById('stato-allineamento').textContent = "SELEZIONA COMPETIZIONE PER INIZIARE";
-            document.getElementById('stato-allineamento').className = "text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-1";
-            document.getElementById('data-ultimo-calcolo').textContent = "ULTIMA ELABORAZIONE: -";
-            
-            const container = document.getElementById('contenuto-principale');
-            container.innerHTML = \`
-                <div class="py-20 text-center text-gray-600">
-                    <svg class="h-10 w-10 mx-auto text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                    </svg>
-                    <p class="text-xs font-bold uppercase tracking-wider">Nessun Campionato Selezionato</p>
-                    <p class="text-[10px] text-gray-500 mt-1">Usa la barra inferiore [SELECT] per scegliere una lega.</p>
-                </div>
-            \`;
+        function eseguiResetGenerale() {
+            if (sseSource) sseSource.close();
+            resetUICompletamente();
+            scaricaDatiIniziali();
+        }
+
+        function resetUICompletamente() {
+            document.getElementById('sse-progress-container').classList.add('hidden');
+            document.getElementById('home-static-stats').classList.remove('hidden');
+            document.getElementById('home-static-stats').textContent = "SISTEMA PRONTO PER L'ELABORAZIONE";
+            document.querySelectorAll('button').forEach(b => b.disabled = false);
+            cambiaTab('home');
         }
     </script>
 </body>
