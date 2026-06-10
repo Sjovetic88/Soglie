@@ -1,5 +1,5 @@
 /**
- * GOLDBET SOGLIE
+ * CLOUDFLARE WORKER: GOLDBET SOGLIE (AMOLED ENGINE APPNATIVE)
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
  * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
@@ -345,7 +345,7 @@ function calibraInMemoria(partiteStoriche) {
   if (migliorConfigurazione.punteggio_ottimalita === -1) {
     const defaultSoglie = {};
     for (const m of LISTA_MERCATI) defaultSoglie[m] = 70.0;
-    migliorConfigurazione.soglie = defaultSoglie;
+    migiorConfigurazione.soglie = defaultSoglie;
   }
 
   return {
@@ -699,7 +699,8 @@ function ottieniHTMLDashboardEngineCompleto() {
                 container.innerHTML = '';
                 campionati.forEach(item => {
                     const card = document.createElement('div');
-                    card.id = \`card-\${pulisciId(item.campionato)}\`;
+                    const cleanId = pulisciId(item.campionato);
+                    card.id = 'card-' + cleanId;
                     card.className = "amoled-card rounded-xl p-4 transition duration-200 cursor-pointer select-none flex flex-col gap-2";
                     
                     // Al click selezioniamo/deselezioniamo il campionato
@@ -712,69 +713,70 @@ function ottieniHTMLDashboardEngineCompleto() {
                     const badgeColore = item.aggiornato ? "text-emerald-400 bg-emerald-950/40" : "text-zinc-600 bg-zinc-950/40";
                     const badgeTesto = item.aggiornato ? "CALIBRATO" : "IN ATTESA";
 
-                    card.innerHTML = \`
-                        <div class="flex justify-between items-center shrink-0">
-                            <div>
-                                <h3 class="text-sm font-black uppercase text-white tracking-wide font-semibold flex items-center gap-2">
-                                    <span id="select-indicator-\${pulisciId(item.campionato)}" class="hidden text-[#00e5ff] text-xs">●</span>
-                                    \${item.campionato}
-                                </h3>
-                                <p class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider mt-0.5" id="desc-\${pulisciId(item.campionato)}">
-                                    Ultimo Match: \${item.ultima_partita || "-"} | Match: \${item.totale_match}
-                                </p>
-                            </div>
-                            <div>
-                                <span id="badge-\${pulisciId(item.campionato)}" class="text-[8px] font-black px-2 py-0.5 rounded \${badgeColore} tracking-widest uppercase">
-                                    \${badgeTesto}
-                                </span>
-                            </div>
-                        </div>
+                    card.innerHTML = 
+                        '<div class="flex justify-between items-center shrink-0">' +
+                            '<div>' +
+                                '<h3 class="text-sm font-black uppercase text-white tracking-wide font-semibold flex items-center gap-2">' +
+                                    '<span id="select-indicator-' + cleanId + '" class="hidden text-[#00e5ff] text-xs">●</span>' +
+                                    item.campionato +
+                                '</h3>' +
+                                '<p class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider mt-0.5" id="desc-' + cleanId + '">' +
+                                    'Ultimo Match: ' + (item.ultima_partita || "-") + ' | Match: ' + item.totale_match +
+                                '</p>' +
+                            '</div>' +
+                            '<div>' +
+                                '<span id="badge-' + cleanId + '" class="text-[8px] font-black px-2 py-0.5 rounded ' + badgeColore + ' tracking-widest uppercase">' +
+                                    badgeTesto +
+                                '</span>' +
+                            '</div>' +
+                        '</div>' +
 
-                        <!-- MICRO PANNELLO PROGRESSO IN LINEA (NASCOSTO DI BASE) -->
-                        <div id="progresso-box-\${pulisciId(item.campionato)}" class="hidden border-t border-zinc-900 pt-3 mt-2 space-y-1.5">
-                            <div class="flex justify-between items-center text-[8px] uppercase tracking-wider font-bold">
-                                <span class="text-zinc-500">Avanzamento Simulazione</span>
-                                <span id="progresso-txt-\${pulisciId(item.campionato)}" class="neon-cyan">0.0%</span>
-                            </div>
-                            <div class="w-full bg-zinc-950 h-1.5 rounded-full overflow-hidden border border-zinc-900">
-                                <div id="progresso-bar-\${pulisciId(item.campionato)}" class="h-full progress-bar-fill" style="width: 0%"></div>
-                            </div>
-                            <p id="progresso-match-\${pulisciId(item.campionato)}" class="text-[8px] text-zinc-500 truncate uppercase mt-1">
-                                Preparazione dati in corso...
-                            </p>
-                        </div>
+                        '<!-- MICRO PANNELLO PROGRESSO IN LINEA (NASCOSTO DI BASE) -->' +
+                        '<div id="progresso-box-' + cleanId + '" class="hidden border-t border-zinc-900 pt-3 mt-2 space-y-1.5">' +
+                            '<div class="flex justify-between items-center text-[8px] uppercase tracking-wider font-bold">' +
+                                '<span class="text-zinc-500">Avanzamento Simulazione</span>' +
+                                '<span id="progresso-txt-' + cleanId + '" class="neon-cyan">0.0%</span>' +
+                            '</div>' +
+                            '<div class="w-full bg-zinc-950 h-1.5 rounded-full overflow-hidden border border-zinc-900">' +
+                                '<div id="progresso-bar-' + cleanId + '" class="h-full progress-bar-fill" style="width: 0%"></div>' +
+                            '</div>' +
+                            '<p id="progresso-match-' + cleanId + '" class="text-[8px] text-zinc-500 truncate uppercase mt-1">' +
+                                'Preparazione dati in corso...' +
+                            '</p>' +
+                        '</div>' +
 
-                        <!-- FISARMONICA RISULTATI POST-CALCOLO (ACCORDION INTERNO ALLA CARD) -->
-                        <div id="dettagli-box-\${pulisciId(item.campionato)}" class="hidden dettagli-backtest-box border-t border-zinc-900 pt-3 mt-3 space-y-3">
-                            <div class="grid grid-cols-2 gap-2 text-center">
-                                <div class="bg-black p-2 rounded border border-zinc-900">
-                                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Segnalate</span>
-                                    <span id="det-consigliate-\${pulisciId(item.campionato)}" class="text-xs font-black text-emerald-400">-</span>
-                                </div>
-                                <div class="bg-black p-2 rounded border border-zinc-900">
-                                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Precisione</span>
-                                    <span id="det-precisione-\${pulisciId(item.campionato)}" class="text-xs font-black text-cyan-400">-</span>
-                                </div>
-                            </div>
+                        '<!-- FISARMONICA RISULTATI POST-CALCOLO (ACCORDION INTERNO ALLA CARD) -->' +
+                        '<div id="dettagli-box-' + cleanId + '" class="hidden dettagli-backtest-box border-t border-zinc-900 pt-3 mt-3 space-y-3">' +
+                            '<div class="grid grid-cols-2 gap-2 text-center">' +
+                                '<div class="bg-black p-2 rounded border border-zinc-900">' +
+                                    '<span class="text-[8px] text-zinc-500 block uppercase font-bold">Segnalate</span>' +
+                                    '<span id="det-consigliate-' + cleanId + '" class="text-xs font-black text-emerald-400">-</span>' +
+                                    '</div>' +
+                                '<div class="bg-black p-2 rounded border border-zinc-900">' +
+                                    '<span class="text-[8px] text-zinc-500 block uppercase font-bold">Precisione</span>' +
+                                    '<span id="det-precisione-' + cleanId + '" class="text-xs font-black text-cyan-400">-</span>' +
+                                '</div>' +
+                            '</div>' +
                             
-                            <!-- Griglia mini a comparsa dei 22 mercati -->
-                            <div id="det-griglia-\${pulisciId(item.campionato)}" class="grid grid-cols-3 gap-1.5 pt-1">
-                                <!-- Generato all'istante -->
-                            </div>
-                        </div>
-                    \`;
+                            '<!-- Griglia mini a comparsa dei 22 mercati -->' +
+                            '<div id="det-griglia-' + cleanId + '" class="grid grid-cols-3 gap-1.5 pt-1">' +
+                                '<!-- Generato all\'istante -->' +
+                            '</div>' +
+                        '</div>';
+                    
                     container.appendChild(card);
                 });
             } catch (err) {
-                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CONNESSIONE: \${err.message}</div>\`;
+                container.innerHTML = '<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CONNESSIONE: ' + err.message + '</div>';
             }
         }
 
         // Toggles selection on cards
         function togglaSelezioneCampionato(campionato) {
+            const cleanId = pulisciId(campionato);
             const idx = campionatiSelezionati.indexOf(campionato);
-            const cardId = \`card-\${pulisciId(campionato)}\`;
-            const indicatorId = \`select-indicator-\${pulisciId(campionato)}\`;
+            const cardId = 'card-' + cleanId;
+            const indicatorId = 'select-indicator-' + cleanId;
             
             const card = document.getElementById(cardId);
             const indicator = document.getElementById(indicatorId);
@@ -796,7 +798,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             const btn = document.getElementById('btn-global-avvia');
             const countLabel = document.getElementById('selezione-counter');
 
-            countLabel.textContent = \`\${campionatiSelezionati.length} SELEZIONATI\`;
+            countLabel.textContent = campionatiSelezionati.length + ' SELEZIONATI';
 
             if (campionatiSelezionati.length > 0) {
                 btn.disabled = false;
@@ -831,29 +833,29 @@ function ottieniHTMLDashboardEngineCompleto() {
                 const idCamp = pulisciId(campionato);
                 
                 // Mostra il blocco di progresso all'interno della card
-                document.getElementById(\`progresso-box-\${idCamp}\`).classList.remove('hidden');
-                document.getElementById(\`dettagli-box-\${idCamp}\`).classList.add('hidden'); // Chiude eventuali risultati vecchi
+                document.getElementById('progresso-box-' + idCamp).classList.remove('hidden');
+                document.getElementById('dettagli-box-' + idCamp).classList.add('hidden'); // Chiude eventuali risultati vecchi
 
                 // Avvia connessione SSE
                 if (currentSseConnection) currentSseConnection.close();
-                currentSseConnection = new EventSource(\`/backtest?campionato=\${encodeURIComponent(campionato)}\`);
+                currentSseConnection = new EventSource('/backtest?campionato=' + encodeURIComponent(campionato));
 
                 currentSseConnection.onmessage = function(event) {
                     const data = JSON.parse(event.data);
 
                     if (data.type === "progress") {
-                        document.getElementById(\`progresso-txt-\${idCamp}\`).textContent = data.percentuale + "%";
-                        document.getElementById(\`progresso-bar-\${idCamp}\`).style.width = data.percentuale + "%";
-                        document.getElementById(\`progresso-match-\${idCamp}\`).textContent = data.ultimoMatch.toUpperCase();
+                        document.getElementById('progresso-txt-' + idCamp).textContent = data.percentuale + "%";
+                        document.getElementById('progresso-bar-' + idCamp).style.width = data.percentuale + "%";
+                        document.getElementById('progresso-match-' + idCamp).textContent = data.ultimoMatch.toUpperCase();
                     } 
                     
                     else if (data.type === "complete") {
                         currentSseConnection.close();
                         
                         // Nascondi barra progresso, aggiorna badge e popola accordion interno
-                        document.getElementById(\`progresso-box-\${idCamp}\`).classList.add('hidden');
+                        document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                         
-                        const badge = document.getElementById(\`badge-\${idCamp}\\`);
+                        const badge = document.getElementById('badge-' + idCamp);
                         badge.className = "text-[8px] font-black px-2 py-0.5 rounded text-emerald-400 bg-emerald-950/40 tracking-widest uppercase";
                         badge.textContent = "CALIBRATO";
 
@@ -864,14 +866,14 @@ function ottieniHTMLDashboardEngineCompleto() {
                     else if (data.type === "error") {
                         currentSseConnection.close();
                         alert("Errore calcolo " + campionato + ": " + data.message);
-                        document.getElementById(\`progresso-box-\${idCamp}\`).classList.add('hidden');
+                        document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                         resolve();
                     }
                 };
 
                 currentSseConnection.onerror = function() {
                     currentSseConnection.close();
-                    document.getElementById(\`progresso-box-\${idCamp}\`).classList.add('hidden');
+                    document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                     resolve();
                 };
             });
@@ -883,10 +885,10 @@ function ottieniHTMLDashboardEngineCompleto() {
             // Salviamo i risultati in memoria per consultarli in seguito
             backtestResults[campionato] = report;
 
-            document.getElementById(\`det-consigliate-\${idCamp}\`).textContent = report.riepilogo_generale.totale_consigliate;
-            document.getElementById(\`det-precisione-\${idCamp}\`).textContent = report.riepilogo_generale.precisione_media + "%";
+            document.getElementById('det-consigliate-' + idCamp).textContent = report.riepilogo_generale.totale_consigliate;
+            document.getElementById('det-precisione-' + idCamp).textContent = report.riepilogo_generale.precisione_media + "%";
 
-            const griglia = document.getElementById(\`det-griglia-\${idCamp}\`);
+            const griglia = document.getElementById('det-griglia-' + idCamp);
             griglia.innerHTML = '';
 
             // Generiamo un badge mini per ognuno dei 22 mercati simulati
@@ -899,15 +901,15 @@ function ottieniHTMLDashboardEngineCompleto() {
                 if (dati.precisione_percentuale < 55) coloreTesto = "text-red-500";
                 else if (dati.precisione_percentuale < 70) coloreTesto = "text-amber-500";
 
-                item.innerHTML = \`
-                    <div class="text-[7px] text-zinc-500 font-bold uppercase truncate">\${m}</div>
-                    <div class="text-[9px] font-bold \${coloreTesto}">\${dati.precisione_percentuale.toFixed(0)}%</div>
-                \`;
+                item.innerHTML = 
+                    '<div class="text-[7px] text-zinc-500 font-bold uppercase truncate">' + m + '</div>' +
+                    '<div class="text-[9px] font-bold ' + coloreTesto + '">' + dati.precisione_percentuale.toFixed(0) + '%</div>';
+                
                 griglia.appendChild(item);
             });
 
             // Apriamo visivamente la fisarmonica dei risultati
-            document.getElementById(\`dettagli-box-\${idCamp}\`).classList.remove('hidden');
+            document.getElementById('dettagli-box-' + idCamp).classList.remove('hidden');
         }
 
         function disabilitaInterfacciaCompletamente(stato) {
@@ -924,13 +926,13 @@ function ottieniHTMLDashboardEngineCompleto() {
                 datiSoglieOperative = await res.json();
 
                 if (datiSoglieOperative.length === 0) {
-                    container.innerHTML = \`<div class="py-12 text-center text-zinc-600 text-xs font-black uppercase">Nessuna soglia calibrata presente nel database.</div>\`;
+                    container.innerHTML = '<div class="py-12 text-center text-zinc-600 text-xs font-black uppercase">Nessuna soglia calibrata presente nel database.</div>';
                     return;
                 }
 
                 renderizzaAccordionSoglie(datiSoglieOperative);
             } catch (err) {
-                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CARICAMENTO SOGLIE: \${err.message}</div>\`;
+                container.innerHTML = '<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CARICAMENTO SOGLIE: ' + err.message + '</div>';
             }
         }
 
@@ -943,22 +945,22 @@ function ottieniHTMLDashboardEngineCompleto() {
                 el.className = "amoled-card rounded-xl overflow-hidden dynamic-soglia-item";
                 el.dataset.campionato = item.campionato.toLowerCase();
 
-                el.innerHTML = \`
-                    <!-- Testata fisarmonica -->
-                    <button onclick="togglaSezioneFisarmonica(\${index})" class="w-full text-left p-4 hover:bg-zinc-950 transition flex justify-between items-center">
-                        <div>
-                            <span class="text-xs font-black uppercase text-white tracking-wide">\${item.campionato}</span>
-                            <span class="text-[8px] text-zinc-500 font-bold block mt-0.5">AGGIORNATO IL: \${item.date_aggiornamento}</span>
-                        </div>
-                        <svg id="soglie-arrow-\${index}" class="h-4 w-4 text-zinc-500 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-                        </svg>
-                    </button>
-                    <!-- Corpo soglie -->
-                    <div id="soglie-body-\${index}" class="hidden p-4 border-t border-zinc-900 bg-black grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        \${costruisciGriglia22SoglieEngine(item)}
-                    </div>
-                \`;
+                el.innerHTML = 
+                    '<!-- Testata fisarmonica -->' +
+                    '<button onclick="togglaSezioneFisarmonica(' + index + ')" class="w-full text-left p-4 hover:bg-zinc-950 transition flex justify-between items-center">' +
+                        '<div>' +
+                            '<span class="text-xs font-black uppercase text-white tracking-wide">' + item.campionato + '</span>' +
+                            '<span class="text-[8px] text-zinc-500 font-bold block mt-0.5">AGGIORNATO IL: ' + item.date_aggiornamento + '</span>' +
+                        '</div>' +
+                        '<svg id="soglie-arrow-' + index + '" class="h-4 w-4 text-zinc-500 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">' +
+                            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>' +
+                        '</svg>' +
+                    '</button>' +
+                    '<!-- Corpo soglie -->' +
+                    '<div id="soglie-body-' + index + '" class="hidden p-4 border-t border-zinc-900 bg-black grid grid-cols-2 sm:grid-cols-3 gap-2">' +
+                        costruisciGriglia22SoglieEngine(item) +
+                    '</div>';
+                
                 container.appendChild(el);
             });
         }
@@ -971,22 +973,23 @@ function ottieniHTMLDashboardEngineCompleto() {
                 const nomeMercato = key.replace('soglia_', '').toUpperCase();
                 const valore = item[key];
                 const bloccato = valore >= 100;
+                const classeColore = bloccato ? 'text-red-500' : 'text-cyan-400';
+                const dicituraValore = bloccato ? 'BLOCKED' : valore.toFixed(1) + '%';
 
-                html += \`
-                    <div class="bg-[#060608] p-2 rounded-lg border border-zinc-950 text-center">
-                        <span class="text-[7px] text-zinc-500 font-bold uppercase block">\${nomeMercato}</span>
-                        <span class="text-xs font-black block mt-0.5 \${bloccato ? 'text-red-500' : 'text-cyan-400'}">
-                            \${bloccato ? 'BLOCKED' : valore.toFixed(1) + '%'}
-                        </span>
-                    </div>
-                \`;
+                html += 
+                    '<div class="bg-[#060608] p-2 rounded-lg border border-zinc-950 text-center">' +
+                        '<span class="text-[7px] text-zinc-500 font-bold uppercase block">' + nomeMercato + '</span>' +
+                        '<span class="text-xs font-black block mt-0.5 ' + classeColore + '">' +
+                            dicituraValore +
+                        '</span>' +
+                    '</div>';
             });
             return html;
         }
 
         function togglaSezioneFisarmonica(idx) {
-            const body = document.getElementById(\`soglie-body-\${idx}\`);
-            const arrow = document.getElementById(\`soglie-arrow-\${idx}\`);
+            const body = document.getElementById('soglie-body-' + idx);
+            const arrow = document.getElementById('soglie-arrow-' + idx);
 
             if (body.classList.contains('hidden')) {
                 body.classList.remove('hidden');
@@ -1018,7 +1021,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             document.getElementById('tab-home').classList.add('hidden');
             document.getElementById('tab-soglie').classList.add('hidden');
             
-            document.getElementById(\`tab-\${tabNome}\`).classList.remove('hidden');
+            document.getElementById('tab-' + tabNome).classList.remove('hidden');
 
             document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-white transition";
             document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-white transition";
@@ -1052,14 +1055,14 @@ function ottieniHTMLDashboardEngineCompleto() {
             // Ripristino grafico di tutte le card
             campionati.forEach(item => {
                 const idCamp = pulisciId(item.campionato);
-                const card = document.getElementById(\`card-\${idCamp}\`);
-                const indicator = document.getElementById(\`select-indicator-\${idCamp}\`);
+                const card = document.getElementById('card-' + idCamp);
+                const indicator = document.getElementById('select-indicator-' + idCamp);
                 
                 if (card) card.className = "amoled-card rounded-xl p-4 transition duration-200 cursor-pointer select-none flex flex-col gap-2";
                 if (indicator) indicator.classList.add('hidden');
                 
-                const progressoBox = document.getElementById(\`progresso-box-\${idCamp}\`);
-                const dettagliBox = document.getElementById(\`dettagli-box-\${idCamp}\`);
+                const progressoBox = document.getElementById('progresso-box-' + idCamp);
+                const dettagliBox = document.getElementById('dettagli-box-' + idCamp);
                 
                 if (progressoBox) progressoBox.classList.add('hidden');
                 if (dettagliBox) dettagliBox.classList.add('hidden');
