@@ -787,7 +787,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                             
                             '<!-- Griglia mini a comparsa dei 22 mercati -->' +
                             '<div id="det-griglia-' + cleanId + '" class="grid grid-cols-3 gap-1.5 pt-1">' +
-                                '<!-- Generato all'istante -->' +
+                                '<!-- Generato istantaneamente -->' +
                             '</div>' +
                         '</div>';
                     
