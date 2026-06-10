@@ -1,5 +1,5 @@
 // ==========================================
-// COSTANTI E CONFIGURAZIONI GLOBALI
+// COSTANTI E CONFIGURAZIONI GLOBALIS
 // ==========================================
 const LISTA_MERCATI = [
   "1", "X", "2", "gg", "ng",
