@@ -1,5 +1,5 @@
 name = "soglie"
-main = "src/index.js"
+main = "src/soglie.js"
 compatibility_date = "2024-03-01"
 
 # Configurazione corretta del trigger orario per l'allineamento automatico delle 00:00
