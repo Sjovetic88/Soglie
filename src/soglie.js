@@ -22,13 +22,20 @@ export default {
       // 2. DIAGNOSTICA: Controllo integrità database e tabelle all'avvio
       if (path === "/api/diagnostica") {
         try {
+          if (!env.DB_PRONOSTICI) {
+            return responseJSON({ status: "ERRORE", messaggio: "Binding DB_PRONOSTICI mancante nel wrangler.toml" }, 500);
+          }
+          if (!env.DB_SOGLIE) {
+            return responseJSON({ status: "ERRORE", messaggio: "Binding DB_SOGLIE mancante nel wrangler.toml" }, 500);
+          }
+
           const testPronostici = await env.DB_PRONOSTICI.prepare("SELECT COUNT(*) as c FROM validazione_risultati;").first();
           const testSoglie = await env.DB_SOGLIE.prepare("SELECT COUNT(*) as c FROM soglie_attive;").first();
           
-          if (testPronostici && testSoglie !== undefined) {
+          if (testPronostici !== null && testSoglie !== null) {
             return responseJSON({ status: "OK", messaggio: "Database sincronizzati correttamente" });
           }
-          return responseJSON({ status: "ERRORE", messaggio: "Tabelle mancanti nei database." }, 500);
+          return responseJSON({ status: "ERRORE", messaggio: "Le tabelle richieste non sono state create nel database." }, 500);
         } catch (err) {
           return responseJSON({ status: "ERRORE", messaggio: err.message }, 500);
         }
@@ -36,39 +43,51 @@ export default {
 
       // 3. API: Estrazione dei campionati e dei loro metadati
       if (path === "/api/campionati") {
-        const queryDati = `
-          SELECT campionato, MAX(date) as ultima_data, COUNT(*) as totale_match 
-          FROM validazione_risultati 
-          WHERE campionato IS NOT NULL 
-          GROUP BY campionato 
-          ORDER BY campionato ASC;
-        `;
-        const { results: d1Results } = await env.DB_PRONOSTICI.prepare(queryDati).all();
+        try {
+          if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
+            return responseJSON({ error: "Configurazione dei database incompleta nel file wrangler.toml." }, 500);
+          }
 
-        const querySoglie = `SELECT campionato, date_aggiornamento FROM soglie_attive;`;
-        const { results: soglieResults } = await env.DB_SOGLIE.prepare(querySoglie).all();
+          const queryDati = `
+            SELECT campionato, MAX(date) as ultima_data, COUNT(*) as totale_match 
+            FROM validazione_risultati 
+            WHERE campionato IS NOT NULL 
+            GROUP BY campionato 
+            ORDER BY campionato ASC;
+          `;
+          const { results: d1Results } = await env.DB_PRONOSTICI.prepare(queryDati).all();
 
-        const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
+          const querySoglie = `SELECT campionato, date_aggiornamento FROM soglie_attive;`;
+          const { results: soglieResults } = await env.DB_SOGLIE.prepare(querySoglie).all();
 
-        const listaCampionati = d1Results.map(r => {
-          const dataSoglia = mappaSoglie.get(r.campionato);
-          return {
-            campionato: r.campionato,
-            ultima_partita: r.ultima_data,
-            totale_match: r.totale_match,
-            aggiornato: dataSoglia ? 1 : 0,
-            data_aggiornamento: dataSoglia || "-"
-          };
-        });
+          const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
 
-        return responseJSON(listaCampionati);
+          const listaCampionati = d1Results.map(r => {
+            const dataSoglia = mappaSoglie.get(r.campionato);
+            return {
+              campionato: r.campionato,
+              ultima_partita: r.ultima_data,
+              totale_match: r.totale_match,
+              aggiornato: dataSoglia ? 1 : 0,
+              data_aggiornamento: dataSoglia || "-"
+            };
+          });
+
+          return responseJSON(listaCampionati);
+        } catch (err) {
+          return responseJSON({ error: err.message }, 500);
+        }
       }
 
       // 4. API: Estrazione di tutte le soglie calcolate (per la tab Soglie Live)
       if (path === "/api/tutte-soglie") {
-        const query = `SELECT * FROM soglie_attive ORDER BY campionato ASC;`;
-        const { results } = await env.DB_SOGLIE.prepare(query).all();
-        return responseJSON(results);
+        try {
+          const query = `SELECT * FROM soglie_attive ORDER BY campionato ASC;`;
+          const { results } = await env.DB_SOGLIE.prepare(query).all();
+          return responseJSON(results);
+        } catch (err) {
+          return responseJSON({ error: err.message }, 500);
+        }
       }
 
       // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match
@@ -345,7 +364,7 @@ function calibraInMemoria(partiteStoriche) {
   if (migliorConfigurazione.punteggio_ottimalita === -1) {
     const defaultSoglie = {};
     for (const m of LISTA_MERCATI) defaultSoglie[m] = 70.0;
-    migiorConfigurazione.soglie = defaultSoglie;
+    migliorConfigurazione.soglie = defaultSoglie;
   }
 
   return {
@@ -656,10 +675,10 @@ function ottieniHTMLDashboardEngineCompleto() {
         let backtestResults = {}; 
         let currentSseConnection = null;
 
-        window.addEventListener('DOMContentLoaded', async () => {
-            await eseguiDiagnosticaIniziale();
-            await caricaCampionatiHome();
-            await caricaSoglieLiveFisarmonica();
+        window.addEventListener('DOMContentLoaded', () => {
+            eseguiDiagnosticaIniziale();
+            caricaCampionatiHome();
+            caricaSoglieLiveFisarmonica();
         });
 
         // 1. FUNZIONE DIAGNOSTICA PROATTIVA
@@ -668,13 +687,17 @@ function ottieniHTMLDashboardEngineCompleto() {
             const text = document.getElementById('diagnostic-text');
             try {
                 const res = await fetch('/api/diagnostica');
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.messaggio || errData.error || ('HTTP Status ' + res.status));
+                }
                 const diagnostica = await res.json();
                 if (diagnostica.status === "OK") {
                     bar.className = "bg-emerald-950/40 border-b border-emerald-900/50 py-2 px-4 text-center transition duration-500";
                     text.className = "text-[9px] text-emerald-400 font-bold uppercase tracking-widest";
                     text.textContent = "✔ DATABASE SINCRONIZZATI | CONNESSIONE D1 STABILE";
                 } else {
-                    mostraErroreDiagnostica(diagnostica.messaggio);
+                    throw new Error(diagnostica.messaggio || "Errore sconosciuto");
                 }
             } catch (err) {
                 mostraErroreDiagnostica(err.message);
@@ -694,6 +717,10 @@ function ottieniHTMLDashboardEngineCompleto() {
             const container = document.getElementById('lista-campionati-container');
             try {
                 const res = await fetch('/api/campionati');
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.error || ('D1 SQLite Errore Status ' + res.status));
+                }
                 campionati = await res.json();
                 
                 container.innerHTML = '';
@@ -767,7 +794,11 @@ function ottieniHTMLDashboardEngineCompleto() {
                     container.appendChild(card);
                 });
             } catch (err) {
-                container.innerHTML = '<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CONNESSIONE: ' + err.message + '</div>';
+                container.innerHTML = 
+                    '<div class="text-center py-10 text-red-500 text-xs font-bold uppercase">' +
+                        'ERRORE DI CARICAMENTO CAMPIONATI:<br>' +
+                        '<span class="text-gray-400 text-[10px] lowercase font-normal block mt-2 px-4">' + err.message + '</span>' +
+                    '</div>';
             }
         }
 
@@ -923,6 +954,10 @@ function ottieniHTMLDashboardEngineCompleto() {
             const container = document.getElementById('soglie-accordions-container');
             try {
                 const res = await fetch('/api/tutte-soglie');
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    throw new Error(errData.error || ('D1 Status ' + res.status));
+                }
                 datiSoglieOperative = await res.json();
 
                 if (datiSoglieOperative.length === 0) {
@@ -932,7 +967,7 @@ function ottieniHTMLDashboardEngineCompleto() {
 
                 renderizzaAccordionSoglie(datiSoglieOperative);
             } catch (err) {
-                container.innerHTML = '<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CARICAMENTO SOGLIE: ' + err.message + '</div>';
+                container.innerHTML = '<div class="text-center py-10 text-red-500 text-xs font-bold uppercase">ERRORE CARICAMENTO SOGLIE:<br><span class="text-zinc-500 text-[10px] block mt-1 font-normal lowercase">' + err.message + '</span></div>';
             }
         }
 
@@ -987,6 +1022,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             return html;
         }
 
+        // 5. METODI SBLOCCATI PER EVITARE INTERRUZIONI SEQUENZIALI
         function togglaSezioneFisarmonica(idx) {
             const body = document.getElementById('soglie-body-' + idx);
             const arrow = document.getElementById('soglie-arrow-' + idx);
@@ -1016,7 +1052,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             });
         }
 
-        // 5. CAMBIO TAB DI NAVIGAZIONE
+        // 6. CAMBIO TAB DI NAVIGAZIONE
         function navigaTab(tabNome) {
             document.getElementById('tab-home').classList.add('hidden');
             document.getElementById('tab-soglie').classList.add('hidden');
