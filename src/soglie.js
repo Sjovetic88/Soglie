@@ -41,11 +41,24 @@ export default {
         }
       }
 
-      // 3. API: Estrazione dei campionati e dei loro metadati
+      // 3. API: Estrazione dei campionati, metadati e data ultima elaborazione globale
       if (path === "/api/campionati") {
         try {
           if (!env.DB_PRONOSTICI || !env.DB_SOGLIE) {
             return responseJSON({ error: "Configurazione dei database incompleta nel file wrangler.toml." }, 500);
+          }
+
+          // Estrazione data ultima elaborazione globale
+          let ultimaElaborazioneGlobale = "-";
+          try {
+            const queryUltimaGlobale = `SELECT MAX(date_aggiornamento) as ultima_globale FROM soglie_attive;`;
+            const rUltima = await env.DB_SOGLIE.prepare(queryUltimaGlobale).first();
+            if (rUltima && rUltima.ultima_globale) {
+              ultimaElaborazioneGlobale = rUltima.ultima_globale;
+            }
+          } catch (e) {
+            // Se la tabella non esiste ancora o è vuota, gestiamo l'errore silenziosamente
+            ultimaElaborazioneGlobale = "-";
           }
 
           const queryDati = `
@@ -62,7 +75,7 @@ export default {
 
           const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
 
-          // Recuperiamo anche i dettagli dell'ultimo match effettivo di ogni campionato per caricarlo sulla UI in modo statico
+          // Dettagli dell'ultimo match effettivo di ogni campionato per caricarlo sulla UI in modo statico
           const dettagliMatchCompleti = [];
           for (const r of d1Results) {
             const queryUltimoMatch = `
@@ -100,7 +113,10 @@ export default {
             };
           });
 
-          return responseJSON(listaCampionati);
+          return responseJSON({
+            campionati: listaCampionati,
+            ultima_elaborazione_globale: ultimaElaborazioneGlobale
+          });
         } catch (err) {
           return responseJSON({ error: err.message }, 500);
         }
@@ -522,10 +538,62 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 // FUNZIONI DI ASSISTENZA MATEMATICA E TEMPO
 // ==========================================
 
-async function caricaCacheCalibrazioni(campionato, env) {
-  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
-  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
+async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
+  const dataInizio = calcolaDataMenoGiorni(dataRiferimento, giorniIndietro);
+  const query = `
+    SELECT * FROM validazione_risultati 
+    WHERE campionato = ? 
+      AND date >= ? 
+      AND date < ?
+      AND fthg IS NOT NULL 
+      AND ftag IS NOT NULL
+    ORDER BY date ASC;
+  `;
+  const { results } = await env.DB_PRONOSTICI.prepare(query).bind(campionato, dataInizio, dataRiferimento).all();
   return results;
+}
+
+async function salvaSogliaAttiva(campionato, dataOggi, soglie, env) {
+  const query = `
+    INSERT INTO soglie_attive (
+      campionato, date_aggiornamento,
+      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
+      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
+      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
+      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ) ON CONFLICT(campionato) DO UPDATE SET
+      date_aggiornamento = excluded.date_aggiornamento,
+      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
+      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
+      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
+      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
+      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
+      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
+      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
+  `;
+
+  await env.DB_SOGLIE.prepare(query).bind(
+    campionato, dataOggi,
+    soglie["1"], soglie["X"], soglie["2"], soglie["gg"], soglie["ng"],
+    soglie["u05"], soglie["o05"], soglie["u15"], soglie["o15"], soglie["u25"], soglie["o25"],
+    soglie["u35"], soglie["o35"], soglie["u45"], soglie["o45"],
+    soglie["sg0"], soglie["sg1"], soglie["sg2"], soglie["sg3"], soglie["sg4"], soglie["sg5"], soglie["sg6p"]
+  ).run();
+}
+
+async function cacheCalibrazioneGiornaliera(campionato, dataCalibrazione, calibrazione, env) {
+  const payload = {
+    campionato,
+    date_calibrazione: dataCalibrazione,
+    finestra_giorni: calibrazione.finestra_giorni,
+    raggio_smussamento: calibrazione.raggio_smussamento,
+    penale_applicata: calibrazione.penale_applicata,
+    ...calibrazione.soglie
+  };
+  const stmt = preparaQuerySalvataggioCache(payload, env);
+  await stmt.run();
 }
 
 function preparaQuerySalvataggioCache(d, env) {
@@ -683,14 +751,14 @@ function ottieniHTMLDashboardEngineCompleto() {
 </head>
 <body class="overflow-x-hidden min-h-screen pb-24">
 
-    <!-- INTESTAZIONE LOGO ENGINE CON LED DI STATO -->
+    <!-- INTESTAZIONE LOGO ENGINE CON LED DI STATO MINIMALE (8PX) -->
     <header class="text-center py-6 mt-2">
-        <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5 inline-flex items-center gap-2.5">
+        <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5 inline-flex items-center gap-2">
             GOLDBET <span class="neon-cyan">SOGLIE</span>
-            <span id="header-status-dot" class="h-3.5 w-3.5 rounded-full bg-amber-500 animate-pulse shadow-[0_0_10px_#f59e0b]"></span>
+            <span id="header-status-dot" class="h-2 w-2 rounded-full bg-amber-500 animate-pulse shadow-[0_0_8px_#f59e0b]"></span>
         </h1>
         <div id="stat-allineamento-globale" class="text-[9px] text-zinc-500 font-bold uppercase tracking-widest mt-1">
-            CONVERSIONE E STRUTTURAZIONE IN MEMORIA
+            ULTIMA ELABORAZIONE: -
         </div>
     </header>
 
@@ -750,12 +818,12 @@ function ottieniHTMLDashboardEngineCompleto() {
             </svg>
         </button>
 
-        <!-- TASTO NITRO (FORZATURA MASSIVA BACKGROUND) -->
-        <button onclick="forzaCalibrazioneBackgroundCompleta()" class="flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-orange-400 transition">
+        <!-- TASTO NITRO (PERSISTENT TOGGLE PER LA VELOCITÀ MASSIMA IN PARALLELO) -->
+        <button id="nav-btn-nitro" onclick="togglaNitroMode()" class="flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-orange-400 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
             </svg>
-            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Nitro</span>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1" id="nitro-txt">Nitro Off</span>
         </button>
 
         <!-- TASTO RESET COMPLETO -->
@@ -776,6 +844,7 @@ function ottieniHTMLDashboardEngineCompleto() {
         let backtestResults = {}; 
         let currentSseConnection = null;
         let isProcessingInCorso = false;
+        let isNitroModeAttiva = false; // Stato della Nitro Mode parallela
 
         window.addEventListener('DOMContentLoaded', () => {
             eseguiDiagnosticaIniziale();
@@ -783,7 +852,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             caricaSoglieLiveFisarmonica();
         });
 
-        // 1. FUNZIONE DIAGNOSTICA PROATTIVA CON ACCENSIONE LED
+        // 1. FUNZIONE DIAGNOSTICA PROATTIVA CON ACCENSIONE LED MINIMALE
         async function eseguiDiagnosticaIniziale() {
             const led = document.getElementById('header-status-dot');
             const sub = document.getElementById('stat-allineamento-globale');
@@ -796,9 +865,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                 const diagnostica = await res.json();
                 if (diagnostica.status === "OK") {
                     // Accende il LED in VERDE NEON
-                    led.className = "h-3.5 w-3.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_12px_#10b981]";
-                    sub.className = "text-[9px] text-emerald-500 font-bold uppercase tracking-widest mt-1";
-                    sub.textContent = "✔ MOTORE DI CALCOLO ONLINE | D1 STABILE";
+                    led.className = "h-2 w-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_#10b981]";
                 } else {
                     throw new Error(diagnostica.messaggio || "Errore sconosciuto");
                 }
@@ -812,7 +879,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             const sub = document.getElementById('stat-allineamento-globale');
             
             // Accende il LED in ROSSO NEON e mostra l'errore SQL sotto il titolo
-            led.className = "h-3.5 w-3.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_12px_#ef4444]";
+            led.className = "h-2 w-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_#ef4444]";
             sub.className = "text-[9px] text-red-500 font-bold uppercase tracking-widest mt-1 px-4";
             sub.textContent = "✖ ERRORE CONNESSIONE D1: " + msg.toUpperCase();
         }
@@ -826,8 +893,17 @@ function ottieniHTMLDashboardEngineCompleto() {
                     const errData = await res.json().catch(() => ({}));
                     throw new Error(errData.error || ('D1 SQLite Errore Status ' + res.status));
                 }
-                campionati = await res.json();
+                const payload = await res.json();
+                campionati = payload.campionati;
                 
+                // Aggiorna dinamicamente l'ora dell'ultima elaborazione globale nell'header
+                const subHeader = document.getElementById('stat-allineamento-globale');
+                if (payload.ultima_elaborazione_globale && payload.ultima_elaborazione_globale !== "-") {
+                    subHeader.textContent = "ULTIMA ELABORAZIONE: " + payload.ultima_elaborazione_globale;
+                } else {
+                    subHeader.textContent = "ULTIMA ELABORAZIONE: NESSUN DATO REGISTRATO";
+                }
+
                 container.innerHTML = '';
                 campionati.forEach(item => {
                     const card = document.createElement('div');
@@ -951,7 +1027,23 @@ function ottieniHTMLDashboardEngineCompleto() {
             }
         }
 
-        // 3. ESECUZIONE DEL MOTORE DI CALCOLO SEQUENZIALE
+        // TOGGLE PER ATTIVARE/DISATTIVARE LA NITRO MODE PARALLELA
+        function togglaNitroMode() {
+            const btn = document.getElementById('nav-btn-nitro');
+            const txt = document.getElementById('nitro-txt');
+
+            isNitroModeAttiva = !isNitroModeAttiva;
+
+            if (isNitroModeAttiva) {
+                txt.textContent = "Nitro On";
+                btn.className = "flex flex-col items-center justify-center w-14 h-12 text-orange-400 transition shadow-[0_0_12px_rgba(251,146,60,0.25)]";
+            } else {
+                txt.textContent = "Nitro Off";
+                btn.className = "flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-orange-400 transition";
+            }
+        }
+
+        // 3. AVVIO MOTORE: SEQUENZIALE (STANDARD) OPPURE PARALLELO ULTRA-VELOCE (NITRO MODE ON)
         async function avviaCalcoloSelezionati() {
             if (campionatiSelezionati.length === 0) return;
 
@@ -961,8 +1053,15 @@ function ottieniHTMLDashboardEngineCompleto() {
             isProcessingInCorso = true;
             disabilitaInterfacciaCompletamente(true);
 
-            for (const camp of campionatiDaElaborare) {
-                await elaboraCampionatoInStreaming(camp);
+            if (isNitroModeAttiva) {
+                // VERA NITRO MODE: Calcolo asincrono di tutti i campionati in parallelo!
+                const promesseCalcolo = campionatiDaElaborare.map(camp => elaboraCampionatoInStreaming(camp));
+                await Promise.all(promesseCalcolo);
+            } else {
+                // MODALITÀ STANDARD: Calcolo sequenziale (uno alla volta)
+                for (const camp of campionatiDaElaborare) {
+                    await elaboraCampionatoInStreaming(camp);
+                }
             }
 
             isProcessingInCorso = false;
@@ -980,11 +1079,10 @@ function ottieniHTMLDashboardEngineCompleto() {
                 document.getElementById('progresso-box-' + idCamp).classList.remove('hidden');
                 document.getElementById('dettagli-box-' + idCamp).classList.add('hidden'); // Chiude accordion vecchi
 
-                // Avvia connessione SSE
-                if (currentSseConnection) currentSseConnection.close();
-                currentSseConnection = new EventSource('/backtest?campionato=' + encodeURIComponent(campionato));
+                // Avvia connessione SSE dedicata
+                let connection = new EventSource('/backtest?campionato=' + encodeURIComponent(campionato));
 
-                currentSseConnection.onmessage = function(event) {
+                connection.onmessage = function(event) {
                     const data = JSON.parse(event.data);
 
                     if (data.type === "progress") {
@@ -1002,7 +1100,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                     } 
                     
                     else if (data.type === "complete") {
-                        currentSseConnection.close();
+                        connection.close();
                         
                         // Nascondi barra progresso, aggiorna badge in 100.0% e popola accordion interno
                         document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
@@ -1020,23 +1118,25 @@ function ottieniHTMLDashboardEngineCompleto() {
                     } 
                     
                     else if (data.type === "error") {
-                        currentSseConnection.close();
-                        alert("Errore calcolo " + campionato + ": " + data.message);
+                        connection.close();
+                        alert("ERRORE SUL SERVER: Il Worker ha riscontrato anomalie sul campionato " + campionato + "\\n\\nDettaglio: " + data.message);
                         document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                         
-                        // Ripristina riga descrittiva
                         const desc = document.getElementById('desc-' + idCamp);
                         desc.textContent = desc.dataset.original;
                         resolve();
                     }
                 };
 
-                currentSseConnection.onerror = function() {
-                    currentSseConnection.close();
+                connection.onerror = function() {
+                    connection.close();
                     document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                     
                     const desc = document.getElementById('desc-' + idCamp);
                     desc.textContent = desc.dataset.original;
+
+                    // Allarme visivo se la connessione fallisce prima di aprirsi (D1 vuoto o tabelle mancanti)
+                    alert("✖ ERRORE DI CONNESSIONE STREAMING (" + campionato + ")\\n\\nIl Worker si è arrestato prima di iniziare. Verifica di aver lanciato lo script di migrazione SQL per creare le tabelle nel tuo database 'soglie_campionati'.");
                     resolve();
                 };
             });
@@ -1077,6 +1177,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             document.querySelectorAll('button').forEach(b => b.disabled = stato);
             document.getElementById('nav-btn-home').disabled = false;
             document.getElementById('nav-btn-soglie').disabled = false;
+            document.getElementById('nav-btn-nitro').disabled = false;
         }
 
         // 4. SEZIONE: SFOGLIATORE GLOBALE DELLE SOGLIE LIVE (TAB 2)
@@ -1152,7 +1253,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             return html;
         }
 
-        // 5. METODI SBLOCCATI PER EVITARE INTERRUZIONI SEQUENZIALI
+        // 5. METODI COMPRESSIONE SERRANDE FISARMONICA
         function togglaSezioneFisarmonica(idx) {
             const body = document.getElementById('soglie-body-' + idx);
             const arrow = document.getElementById('soglie-arrow-' + idx);
@@ -1168,7 +1269,6 @@ function ottieniHTMLDashboardEngineCompleto() {
             }
         }
 
-        // Filtro rapido delle soglie live nella tab di monitoraggio
         function filtraSoglie() {
             const query = document.getElementById('cerca-soglie-input').value.toLowerCase();
             const items = document.querySelectorAll('.dynamic-soglia-item');
@@ -1201,23 +1301,16 @@ function ottieniHTMLDashboardEngineCompleto() {
             }
         }
 
-        // Calibrazione nitro massiva in background
-        async function forzaCalibrazioneBackgroundCompleta() {
-            if (!confirm("Desideri lanciare la calibrazione 'NITRO' per tutti i campionati attivi? L'operazione avverrà in background.")) return;
-            try {
-                const res = await fetch('/run-live');
-                alert("Processo Nitro avviato correttamente in background su Cloudflare.");
-            } catch (err) {
-                alert("Errore Nitro: " + err.message);
-            }
-        }
-
         // Reset completo della sessione
         function resetGeneraleEngine() {
             if (currentSseConnection) currentSseConnection.close();
             campionatiSelezionati = [];
             backtestResults = {};
             isProcessingInCorso = false;
+            
+            // Disattiva la Nitro se accesa
+            if (isNitroModeAttiva) togglaNitroMode();
+            
             aggiornaBottoneAvvioSoglie();
             
             // Ripristino grafico di tutte le card
