@@ -57,7 +57,6 @@ export default {
               ultimaElaborazioneGlobale = rUltima.ultima_globale;
             }
           } catch (e) {
-            // Se la tabella non esiste ancora o è vuota, gestiamo l'errore silenziosamente
             ultimaElaborazioneGlobale = "-";
           }
 
@@ -246,6 +245,7 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
     return;
   }
 
+  // Chiamata corretta della funzione con la sua firma allineata
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
   const mappaCache = new Map(cacheCalibrazioni.map(c => [c.date_calibrazione, c]));
 
@@ -627,6 +627,13 @@ function preparaQuerySalvataggioCache(d, env) {
   );
 }
 
+// FIRMA CORRETTA ED ALLINEATA DELLA FUNZIONE DI CACHE
+async function caricaCacheCalibrazioni(campionato, env) {
+  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
+  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
+  return results;
+}
+
 function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
   if (dateUniche.length === 0) return -1;
   const primaDataAssoluta = dateUniche[0];
@@ -852,7 +859,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             caricaSoglieLiveFisarmonica();
         });
 
-        // 1. FUNZIONE DIAGNOSTICA PROATTIVA CON ACCENSIONE LED MINIMALE
+        // 1. FUNZIONE DIAGNOSTICA PROATTIVA CON ACCENSIONE LED MINIMALE (8PX)
         async function eseguiDiagnosticaIniziale() {
             const led = document.getElementById('header-status-dot');
             const sub = document.getElementById('stat-allineamento-globale');
@@ -864,7 +871,6 @@ function ottieniHTMLDashboardEngineCompleto() {
                 }
                 const diagnostica = await res.json();
                 if (diagnostica.status === "OK") {
-                    // Accende il LED in VERDE NEON
                     led.className = "h-2 w-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_#10b981]";
                 } else {
                     throw new Error(diagnostica.messaggio || "Errore sconosciuto");
@@ -878,7 +884,6 @@ function ottieniHTMLDashboardEngineCompleto() {
             const led = document.getElementById('header-status-dot');
             const sub = document.getElementById('stat-allineamento-globale');
             
-            // Accende il LED in ROSSO NEON e mostra l'errore SQL sotto il titolo
             led.className = "h-2 w-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_#ef4444]";
             sub.className = "text-[9px] text-red-500 font-bold uppercase tracking-widest mt-1 px-4";
             sub.textContent = "✖ ERRORE CONNESSIONE D1: " + msg.toUpperCase();
@@ -899,7 +904,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                 // Aggiorna dinamicamente l'ora dell'ultima elaborazione globale nell'header
                 const subHeader = document.getElementById('stat-allineamento-globale');
                 if (payload.ultima_elaborazione_globale && payload.ultima_elaborazione_globale !== "-") {
-                    subHeader.textContent = "ULTIMA ELABORAZIONE: " + payload.ultima_elaborazione_globale;
+                    subHeader.textContent = "ULTIMA ELABORAZIONE: " + formattaDataMMDDYYYY_conOra(payload.ultima_elaborazione_globale);
                 } else {
                     subHeader.textContent = "ULTIMA ELABORAZIONE: NESSUN DATO REGISTRATO";
                 }
@@ -1229,6 +1234,22 @@ function ottieniHTMLDashboardEngineCompleto() {
                 
                 container.appendChild(el);
             });
+        }
+
+        // Metodo per formattare la data con ora per l'header dinamico
+        function formattaDataMMDDYYYY_conOra(dataOraStr) {
+            if (!dataOraStr || dataOraStr === "-") return "-";
+            var partiSpazio = dataOraStr.split(" ");
+            if (partiSpazio.length < 1) return dataOraStr;
+            
+            var dataParte = partiSpazio[0];
+            var oraParte = partiSpazio[1] || "";
+            
+            var partiData = dataParte.split("-");
+            if (partiData.length !== 3) return dataOraStr;
+            
+            var dataFormattata = partiData[1] + "-" + partiData[2] + "-" + partiData[0];
+            return dataFormattata + " " + oraParte;
         }
 
         function costruisciGriglia22SoglieEngine(item) {
