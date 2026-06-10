@@ -1,5 +1,5 @@
 /**
- * CLOUDFLARE WORKER: GOLDBET SOGLIE (ENGINE & DASHBOARD)
+ * CLOUDFLARE WORKER: GOLDBET SOGLIE (AMOLED ENGINE APPNATIVE)
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
  * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
@@ -11,17 +11,31 @@ export default {
       const url = new URL(request.url);
       const path = url.pathname;
 
-      // 1. ENDPOINT: Dashboard HTML AMOLED Black
+      // 1. FRONTEND: Pagina Unica AMOLED Black Dashboard
       if (path === "/" || path === "/index.html") {
-        return new Response(ottieniHTMLDashboardEngine(), {
+        return new Response(ottieniHTMLDashboardEngineCompleto(), {
           status: 200,
           headers: { "Content-Type": "text/html;charset=UTF-8" }
         });
       }
 
-      // 2. ENDPOINT: API per ottenere la lista dinamica dei campionati e i loro stati
+      // 2. DIAGNOSTICA: Controllo integrità database e tabelle all'avvio
+      if (path === "/api/diagnostica") {
+        try {
+          const testPronostici = await env.DB_PRONOSTICI.prepare("SELECT COUNT(*) as c FROM validazione_risultati;").first();
+          const testSoglie = await env.DB_SOGLIE.prepare("SELECT COUNT(*) as c FROM soglie_attive;").first();
+          
+          if (testPronostici && testSoglie !== undefined) {
+            return responseJSON({ status: "OK", messaggio: "Database sincronizzati correttamente" });
+          }
+          return responseJSON({ status: "ERRORE", messaggio: "Tabelle mancanti nei database." }, 500);
+        } catch (err) {
+          return responseJSON({ status: "ERRORE", messaggio: err.message }, 500);
+        }
+      }
+
+      // 3. API: Estrazione dei campionati e dei loro metadati
       if (path === "/api/campionati") {
-        // Estrae l'elenco e l'ultima data disponibile per ogni campionato
         const queryDati = `
           SELECT campionato, MAX(date) as ultima_data, COUNT(*) as totale_match 
           FROM validazione_risultati 
@@ -31,7 +45,6 @@ export default {
         `;
         const { results: d1Results } = await env.DB_PRONOSTICI.prepare(queryDati).all();
 
-        // Legge le soglie già calcolate nel database delle soglie per mostrare se sono aggiornate
         const querySoglie = `SELECT campionato, date_aggiornamento FROM soglie_attive;`;
         const { results: soglieResults } = await env.DB_SOGLIE.prepare(querySoglie).all();
 
@@ -51,21 +64,20 @@ export default {
         return responseJSON(listaCampionati);
       }
 
-      // 3. ENDPOINT: API per leggere le soglie attive di tutti i campionati
+      // 4. API: Estrazione di tutte le soglie calcolate (per la tab Soglie Live)
       if (path === "/api/tutte-soglie") {
         const query = `SELECT * FROM soglie_attive ORDER BY campionato ASC;`;
         const { results } = await env.DB_SOGLIE.prepare(query).all();
         return responseJSON(results);
       }
 
-      // 4. ENDPOINT: API streaming per il Backtest in Tempo Reale (SSE)
+      // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match
       if (path === "/backtest") {
         const campionato = url.searchParams.get("campionato");
         if (!campionato) {
           return responseJSON({ error: "Parametro 'campionato' mancante" }, 400);
         }
 
-        // Utilizziamo un canale SSE per inviare aggiornamenti progressivi al client
         const { readable, writable } = new TransformStream();
         const writer = writable.getWriter();
         const encoder = new TextEncoder();
@@ -91,10 +103,10 @@ export default {
         });
       }
 
-      // 5. ENDPOINT: Ricalcolatore Live rapido
+      // 6. API: Calibrazione live forzata di tutti i campionati
       if (path === "/run-live") {
         ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
-        return responseJSON({ status: "Calibrazione live pianificata in background." });
+        return responseJSON({ status: "Calibrazione live programmata ed avviata in background." });
       }
 
       return responseJSON({ error: "Endpoint non trovato." }, 404);
@@ -110,7 +122,7 @@ export default {
 };
 
 // ==========================================
-// UTILITY DI CONFIGURAZIONE E STRUTTURE
+// FUNZIONI DI TRASMISSIONE E SUPPORTO
 // ==========================================
 
 function responseJSON(data, status = 200) {
@@ -124,7 +136,7 @@ function responseJSON(data, status = 200) {
 }
 
 // ==========================================
-// MOTORE DI CALCOLO MATEMATICO & SSE STREAMING
+// ALGORITMO DI BACKTEST & STREAMING (SSE)
 // ==========================================
 
 const LISTA_MERCATI = [
@@ -158,9 +170,6 @@ async function eseguiCalibrazioneLiveTuttiCampionati(env) {
   }
 }
 
-/**
- * Esegue il backtest matematico trasmettendo i dati passo-passo via Server-Sent Events (SSE)
- */
 async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
   const queryTuttiMatch = `
     SELECT * FROM validazione_risultati 
@@ -170,17 +179,13 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
   const { results: tuttiMatch } = await env.DB_PRONOSTICI.prepare(queryTuttiMatch).bind(campionato).all();
 
   if (tuttiMatch.length < 150) {
-    const msg = JSON.stringify({ type: "error", message: "Dati storici insufficienti per simulare questo campionato (servono almeno 150 match)." });
+    const msg = JSON.stringify({ type: "error", message: "Dati storici insufficienti (minimo 150 match)." });
     await writer.write(encoder.encode(`data: ${msg}\n\n`));
     return;
   }
 
-  // Estrazione della cache delle calibrazioni dal database dedicato
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
-  const mappaCache = new Map();
-  for (const c of cacheCalibrazioni) {
-    mappaCache.set(c.date_calibrazione, c);
-  }
+  const mappaCache = new Map(cacheCalibrazioni.map(c => [c.date_calibrazione, c]));
 
   const reportMercati = inizializzaStrutturaReport();
   let totaleGiornateCalcolate = 0;
@@ -192,18 +197,16 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
   const primaDataSimulabileIdx = trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, 1000);
 
   if (primaDataSimulabileIdx === -1 || primaDataSimulabileIdx >= dateUniche.length) {
-    const msg = JSON.stringify({ type: "error", message: "Dati insufficienti per strutturare i primi 1000 giorni di storico di calibrazione." });
+    const msg = JSON.stringify({ type: "error", message: "Storico iniziale 1000 giorni insufficiente." });
     await writer.write(encoder.encode(`data: ${msg}\n\n`));
     return;
   }
 
-  // Incrementiamo l'indice iniziale nel conteggio dei match già considerati "storico iniziale statico"
   for (let idx = 0; idx < primaDataSimulabileIdx; idx++) {
     const matchesData = tuttiMatch.filter(m => m.date === dateUniche[idx]);
     matchesProcessati += matchesData.length;
   }
 
-  // Ciclo giorno per giorno in tempo reale
   for (let i = primaDataSimulabileIdx; i < dateUniche.length; i++) {
     const dataCorrente = dateUniche[i];
     let soglieGiornata = mappaCache.get(dataCorrente);
@@ -238,7 +241,7 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
 
     matchesProcessati += matchDelGiorno.length;
 
-    // Generiamo l'aggiornamento di progresso in diretta streaming per la Dashboard
+    // Invio progresso in real-time tramite SSE
     if (matchDelGiorno.length > 0) {
       const ultimoMatchStr = `${dataCorrente} | ${matchDelGiorno[0].home_team} - ${matchDelGiorno[0].away_team} ${matchDelGiorno[0].fthg}-${matchDelGiorno[0].ftag}`;
       const percentualeStr = ((matchesProcessati / totaleMatchesDaSimulare) * 100).toFixed(1);
@@ -255,16 +258,15 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
     }
   }
 
-  // Scrittura finale nel database dedicato delle calibrazioni trovate in background
   if (queryBatchScrittura.length > 0) {
     await env.DB_SOGLIE.batch(queryBatchScrittura);
   }
 
-  // Invio dei risultati finali al termine dello streaming
   const reportRiepilogativo = generaRiepilogoFinalizzato(campionato, totaleMatchesDaSimulare, totaleGiornateCalcolate, reportMercati);
   const chunkFinale = JSON.stringify({
     type: "complete",
-    report: reportRiepilogativo
+    report: reportRiepilogativo,
+    soglie_attive: queryBatchScrittura.length > 0 ? queryBatchScrittura[queryBatchScrittura.length - 1] : null
   });
 
   await writer.write(encoder.encode(`data: ${chunkFinale}\n\n`));
@@ -467,65 +469,13 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 }
 
 // ==========================================
-// FUNZIONI DI GESTIONE DATI E FILE SYSTEM D1
+// METODI INTERFACCIAMENTO D1 DATABASE
 // ==========================================
 
-async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
-  const dataInizio = calcolaDataMenoGiorni(dataRiferimento, giorniIndietro);
-  const query = `
-    SELECT * FROM validazione_risultati 
-    WHERE campionato = ? 
-      AND date >= ? 
-      AND date < ?
-      AND fthg IS NOT NULL 
-      AND ftag IS NOT NULL
-    ORDER BY date ASC;
-  `;
-  const { results } = await env.DB_PRONOSTICI.prepare(query).bind(campionato, dataInizio, dataRiferimento).all();
+async function caricaCacheCalibrazioni(campionato, env) {
+  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
+  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
   return results;
-}
-
-async function salvaSogliaAttiva(campionato, dataOggi, soglie, env) {
-  const query = `
-    INSERT INTO soglie_attive (
-      campionato, date_aggiornamento,
-      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
-      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
-      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
-      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    ) ON CONFLICT(campionato) DO UPDATE SET
-      date_aggiornamento = excluded.date_aggiornamento,
-      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
-      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
-      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
-      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
-      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
-      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
-      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
-  `;
-
-  await env.DB_SOGLIE.prepare(query).bind(
-    campionato, dataOggi,
-    soglie["1"], soglie["X"], soglie["2"], soglie["gg"], soglie["ng"],
-    soglie["u05"], soglie["o05"], soglie["u15"], soglie["o15"], soglie["u25"], soglie["o25"],
-    soglie["u35"], soglie["o35"], soglie["u45"], soglie["o45"],
-    soglie["sg0"], soglie["sg1"], soglie["sg2"], soglie["sg3"], soglie["sg4"], soglie["sg5"], soglie["sg6p"]
-  ).run();
-}
-
-async function cacheCalibrazioneGiornaliera(campionato, dataCalibrazione, calibrazione, env) {
-  const payload = {
-    campionato,
-    date_calibrazione: dataCalibrazione,
-    finestra_giorni: calibrazione.finestra_giorni,
-    raggio_smussamento: calibrazione.raggio_smussamento,
-    penale_applicata: calibrazione.penale_applicata,
-    ...calibrazione.soglie
-  };
-  const stmt = preparaQuerySalvataggioCache(payload, env);
-  await stmt.run();
 }
 
 function preparaQuerySalvataggioCache(d, env) {
@@ -559,93 +509,11 @@ function preparaQuerySalvataggioCache(d, env) {
   );
 }
 
-async function caricaCacheCalibrazioni(campionato, env) {
-  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
-  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
-  return results;
-}
-
-function ottieniDataOggiYMD() {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function calcolaDataMenoGiorni(dataRiferimentoYMD, giorni) {
-  const d = new Date(dataRiferimentoYMD);
-  d.setDate(d.getDate() - giorni);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
-  if (dateUniche.length === 0) return -1;
-  const primaDataAssoluta = dateUniche[0];
-
-  for (let i = 0; i < dateUniche.length; i++) {
-    const differenzaGiorni = (new Date(dateUniche[i]) - new Date(primaDataAssoluta)) / (1000 * 60 * 60 * 24);
-    if (differenzaGiorni >= giorniMinimi) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function inizializzaStrutturaReport() {
-  const report = {};
-  for (const m of LISTA_MERCATI) {
-    report[m] = { scommesseConsigliate: 0, scommesseVinte: 0 };
-  }
-  return report;
-}
-
-function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCalcolate, reportMercati) {
-  const mercatiDettaglio = {};
-  let totaleConsigliateGlobali = 0;
-  let totaleVinteGlobali = 0;
-
-  for (const m of LISTA_MERCATI) {
-    const dati = reportMercati[m];
-    const precisione = dati.scommesseConsigliate > 0 
-      ? Number(((dati.scommesseVinte / dati.scommesseConsigliate) * 100).toFixed(2)) 
-      : 0;
-
-    mercatiDettaglio[m] = {
-      consigliate: dati.scommesseConsigliate,
-      vinte: dati.scommesseVinte,
-      precisione_percentuale: precisione
-    };
-
-    totaleConsigliateGlobali += dati.scommesseConsigliate;
-    totaleVinteGlobali += dati.scommesseVinte;
-  }
-
-  const precisioneGlobale = totaleConsigliateGlobali > 0 
-    ? Number(((totaleVinteGlobali / totaleConsigliateGlobali) * 100).toFixed(2)) 
-    : 0;
-
-  return {
-    campionato,
-    partite_analizzate: totalePartite,
-    giornate_simulate: totaleGiornateCalcolate,
-    riepilogo_generale: {
-      totale_consigliate: totaleConsigliateGlobali,
-      totale_vinte: totaleVinteGlobali,
-      precisione_media: precisioneGlobale
-    },
-    esiti: mercatiDettaglio
-  };
-}
-
 // ==========================================
-// INTERFACCIA GRAFICA INTEGRATA (GOLDBET SOGLIE)
+// RENDERING COMPLETO PANNELLO HTML (GOLDBET)
 // ==========================================
 
-function ottieniHTMLDashboardEngine() {
+function ottieniHTMLDashboardEngineCompleto() {
   return `
 <!DOCTYPE html>
 <html lang="it">
@@ -663,20 +531,25 @@ function ottieniHTMLDashboardEngine() {
             -webkit-tap-highlight-color: transparent;
         }
         .amoled-card {
-            background-color: #0d0d0d;
+            background-color: #0a0a0c;
             border: 1px solid #1c1c1e;
         }
         .neon-cyan {
             color: #00e5ff;
             text-shadow: 0 0 10px rgba(0, 229, 255, 0.2);
         }
-        .border-neon {
-            border-color: rgba(0, 229, 255, 0.4);
-            box-shadow: 0 0 10px rgba(0, 229, 255, 0.1);
+        .glow-border {
+            border-color: #00e5ff !important;
+            box-shadow: 0 0 15px rgba(0, 229, 255, 0.25);
         }
         .bottom-nav {
             background-color: #000000;
             border-top: 1px solid #1c1c1e;
+        }
+        .progress-bar-fill {
+            background-color: #00e5ff;
+            box-shadow: 0 0 8px #00e5ff;
+            transition: width 0.1s linear;
         }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -684,115 +557,89 @@ function ottieniHTMLDashboardEngine() {
 </head>
 <body class="overflow-x-hidden min-h-screen pb-24">
 
-    <!-- COMPONENTE SUPERIORE - MONITOR STATISTICHE REAL-TIME -->
-    <div class="sticky top-0 z-50 bg-black/90 backdrop-blur-md border-b border-zinc-900 py-4 px-4">
-        <div class="max-w-md mx-auto text-center">
-            <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5">
-                GOLDBET <span class="neon-cyan">SOGLIE</span>
-            </h1>
-            
-            <!-- CONTATORI DI AVANZAMENTO IN DIRETTA SSE -->
-            <div id="sse-progress-container" class="hidden my-2">
-                <div class="text-xs font-black text-white tracking-widest uppercase">
-                    <span id="sse-count-match">0 / 0</span> MATCHES | <span id="sse-percent" class="neon-cyan">0.0%</span>
-                </div>
-                <div class="text-[9px] text-gray-500 font-bold uppercase tracking-wider overflow-hidden text-ellipsis whitespace-nowrap mt-1 px-4" id="sse-current-match">
-                    INIZIALIZZAZIONE SIMULAZIONE IN MEMORIA...
-                </div>
-            </div>
-
-            <!-- STATO DI BASE -->
-            <div id="home-static-stats" class="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
-                SISTEMA PRONTO PER L'ELABORAZIONE
-            </div>
-        </div>
+    <!-- BARRA DIAGNOSTICA SUPERIORE -->
+    <div id="diagnostic-bar" class="bg-amber-950/40 border-b border-amber-900/50 py-2 px-4 text-center">
+        <span id="diagnostic-text" class="text-[9px] text-amber-500 font-bold uppercase tracking-widest animate-pulse">
+            Sincronizzazione in corso con Cloudflare D1...
+        </span>
     </div>
 
-    <!-- MAIN WRAPPER (MAX-WIDTH SMARTPHONE) -->
-    <div class="max-w-md mx-auto px-4 mt-4">
+    <!-- INTESTAZIONE LOGO ENGINE -->
+    <header class="text-center py-5">
+        <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5">
+            GOLDBET <span class="neon-cyan">SOGLIE</span>
+        </h1>
+        <div id="stat-allineamento-globale" class="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">
+            MOTORE DI CALCOLO ATTIVO
+        </div>
+    </header>
 
-        <!-- SEZIONE 1: HOME TAB (ELENCO CAMPIONATI) -->
-        <div id="tab-home" class="space-y-3">
-            <h2 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2 px-1">Seleziona Competizione Attiva</h2>
-            <div id="lista-campionati-container" class="space-y-2.5">
-                <div class="py-12 text-center text-zinc-600">Caricamento campionati in corso...</div>
+    <!-- CONTENITORE CENTRALE -->
+    <main class="max-w-md mx-auto px-4 mt-2">
+
+        <!-- TAB 1: HOME (CON SELEZIONE E INTEGRAZIONE PROGRESSO INTERNO) -->
+        <div id="tab-home" class="space-y-4">
+            <div class="flex justify-between items-center px-1">
+                <span class="text-xs font-black text-zinc-500 uppercase tracking-widest">Lega / Campionato</span>
+                <span id="selezione-counter" class="text-[10px] text-zinc-600 font-bold">0 SELEZIONATI</span>
+            </div>
+
+            <!-- Elenco dinamico dei campionati -->
+            <div id="lista-campionati-container" class="space-y-3">
+                <div class="py-12 text-center text-zinc-600 animate-pulse text-xs uppercase tracking-widest">Caricamento in corso...</div>
             </div>
         </div>
 
-        <!-- SEZIONE 2: SOGLIE LIVE TAB (TUTTI GLI ESITI DI TUTTI I CAMPIONATI) -->
+        <!-- TAB 2: SOGLIE LIVE GLOBALI (SFOGLIATORE FISARMONICA) -->
         <div id="tab-soglie" class="hidden space-y-4">
-            <div class="flex justify-between items-center mb-1">
-                <h2 class="text-xs font-bold text-gray-500 uppercase tracking-widest">Soglie Operative Live</h2>
-                <input type="text" id="filtro-soglie" oninput="filtraSoglieInDiretta()" placeholder="Cerca campionato..." class="bg-[#0d0d0d] border border-zinc-800 text-[10px] rounded-lg px-2 py-1 text-white focus:outline-none focus:border-cyan-400 w-1/2">
-            </div>
-            
-            <div id="soglie-globali-container" class="space-y-3">
-                <!-- Generato Dinamicamente tramite Fisarmonica (Accordion) -->
-                <div class="py-12 text-center text-zinc-600">Caricamento database soglie...</div>
-            </div>
-        </div>
-
-        <!-- SEZIONE 3: SCHERMATA DETTAGLIATA RISULTATI BACKTEST (DOPO L'AVVIO) -->
-        <div id="tab-risultati" class="hidden space-y-4">
-            <div class="flex items-center gap-3 border-b border-zinc-800 pb-3 justify-between">
-                <div>
-                    <h2 id="backtest-campionato-nome" class="text-lg font-black uppercase text-white">SERIE A</h2>
-                    <p class="text-[9px] text-zinc-500 uppercase font-bold">Resoconto simulato senza Look-Ahead Bias</p>
-                </div>
-                <button onclick="tornaAllaHome()" class="text-cyan-400 text-xs font-bold uppercase tracking-wider px-2 py-1 border border-cyan-400/20 rounded">Indietro</button>
+            <div class="flex justify-between items-center px-1 gap-4">
+                <span class="text-xs font-black text-zinc-500 uppercase tracking-widest">Cerca Soglie</span>
+                <input type="text" id="cerca-soglie-input" oninput="filtraSoglie()" placeholder="Cerca competizione..." class="bg-[#0c0c0e] border border-zinc-800 text-[10px] text-white rounded px-2.5 py-1.5 focus:outline-none focus:border-cyan-400 w-1/2">
             </div>
 
-            <div class="grid grid-cols-3 gap-2 text-center">
-                <div class="bg-[#0d0d0d] p-3 rounded-xl border border-zinc-900">
-                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Match</span>
-                    <span id="res-partite" class="text-base font-black text-white">-</span>
-                </div>
-                <div class="bg-[#0d0d0d] p-3 rounded-xl border border-zinc-900">
-                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Consigliati</span>
-                    <span id="res-consigliate" class="text-base font-black text-teal-400">-</span>
-                </div>
-                <div class="bg-[#0d0d0d] p-3 rounded-xl border border-zinc-900">
-                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Precisione</span>
-                    <span id="res-precisione" class="text-base font-black text-cyan-400">-</span>
-                </div>
-            </div>
-
-            <div id="risultati-esiti-container" class="space-y-2">
-                <!-- Elenco dei 22 esiti simulati -->
+            <div id="soglie-accordions-container" class="space-y-3">
+                <!-- Generato Dinamicamente -->
             </div>
         </div>
 
-    </div>
+    </main>
 
-    <!-- BARRA DI NAVIGAZIONE INFERIORE (BOTTOM DOCK) -->
+    <!-- BARRA OPERATIVA INFERIORE -->
     <nav class="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-40 bottom-nav h-16 flex items-center justify-around px-2">
         
-        <!-- HOME BUTTON -->
-        <button id="nav-btn-home" onclick="cambiaTab('home')" class="flex flex-col items-center justify-center w-16 h-12 text-cyan-400 transition">
+        <!-- PULSANTE VISTA HOME -->
+        <button id="nav-btn-home" onclick="navigaTab('home')" class="flex flex-col items-center justify-center w-14 h-12 text-cyan-400 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h3m-6 0a1 1 0 001-1v-4a1 1 0 00-1-1h-3a1 1 0 00-1 1v4a1 1 0 001 1m-6 0h6"></path>
             </svg>
-            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Home</span>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Lega</span>
         </button>
 
-        <!-- SOGLIE LIVE BUTTON -->
-        <button id="nav-btn-soglie" onclick="cambiaTab('soglie')" class="flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition">
+        <!-- PULSANTE VISTA SOGLIE LIVE -->
+        <button id="nav-btn-soglie" onclick="navigaTab('soglie')" class="flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-white transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
             </svg>
             <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Soglie Live</span>
         </button>
 
-        <!-- NITRO BUTTON (MASS BACKGROUND RUN) -->
-        <button id="nav-btn-nitro" onclick="lanciaNitroBulk()" class="flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-orange-400 transition">
+        <!-- TASTO CENTRALE AVVIA (SELEZIONE IN HOME) -->
+        <button id="btn-global-avvia" onclick="avviaCalcoloSelezionati()" disabled class="flex flex-col items-center justify-center w-16 h-16 bg-gradient-to-b from-zinc-900 to-black border border-zinc-800 rounded-full text-zinc-600 cursor-not-allowed shadow-lg -translate-y-3 transition duration-200">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+            </svg>
+        </button>
+
+        <!-- TASTO NITRO (FORZATURA MASSIVA BACKGROUND) -->
+        <button onclick="forzaCalibrazioneBackgroundCompleta()" class="flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-orange-400 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
             </svg>
             <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Nitro</span>
         </button>
 
-        <!-- RESET BUTTON -->
-        <button onclick="eseguiResetGenerale()" class="flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-red-500 transition">
+        <!-- TASTO RESET COMPLETO -->
+        <button onclick="resetGeneraleEngine()" class="flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-red-500 transition">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
             </svg>
@@ -801,251 +648,345 @@ function ottieniHTMLDashboardEngine() {
 
     </nav>
 
-    <!-- LOGICA DI FUNZIONAMENTO FRONTEND -->
+    <!-- CODICE INTERATTIVO JAVASCRIPT FRONTEND -->
     <script>
-        let campionatiCache = [];
-        let soglieCache = [];
-        let sseSource = null;
+        let campionati = [];
+        let campionatiSelezionati = [];
+        let datiSoglieOperative = [];
+        let backtestResults = {}; 
+        let currentSseConnection = null;
 
         window.addEventListener('DOMContentLoaded', async () => {
-            await scaricaDatiIniziali();
+            await eseguiDiagnosticaIniziale();
+            await caricaCampionatiHome();
+            await caricaSoglieLiveFisarmonica();
         });
 
-        async function scaricaDatiIniziali() {
-            await scaricaCampionatiHome();
-            await scaricaSoglieGlobali();
+        // 1. FUNZIONE DIAGNOSTICA PROATTIVA
+        async function eseguiDiagnosticaIniziale() {
+            const bar = document.getElementById('diagnostic-bar');
+            const text = document.getElementById('diagnostic-text');
+            try {
+                const res = await fetch('/api/diagnostica');
+                const diagnostica = await res.json();
+                if (diagnostica.status === "OK") {
+                    bar.className = "bg-emerald-950/40 border-b border-emerald-900/50 py-2 px-4 text-center transition duration-500";
+                    text.className = "text-[9px] text-emerald-400 font-bold uppercase tracking-widest";
+                    text.textContent = "✔ DATABASE SINCRONIZZATI | CONNESSIONE D1 STABILE";
+                } else {
+                    mostraErroreDiagnostica(diagnostica.messaggio);
+                }
+            } catch (err) {
+                mostraErroreDiagnostica(err.message);
+            }
         }
 
-        // 1. CARICAMENTO DATI PER LA SCHERMATA HOME
-        async function scaricaCampionatiHome() {
+        function mostraErroreDiagnostica(msg) {
+            const bar = document.getElementById('diagnostic-bar');
+            const text = document.getElementById('diagnostic-text');
+            bar.className = "bg-red-950/40 border-b border-red-900/50 py-2 px-4 text-center";
+            text.className = "text-[9px] text-red-500 font-bold uppercase tracking-widest";
+            text.textContent = "✖ ERRORE DI CONFIGURAZIONE D1: " + msg.toUpperCase();
+        }
+
+        // 2. RENDERING LISTA CAMPIONATI (HOME TAB)
+        async function caricaCampionatiHome() {
             const container = document.getElementById('lista-campionati-container');
             try {
                 const res = await fetch('/api/campionati');
-                campionatiCache = await res.json();
+                campionati = await res.json();
                 
                 container.innerHTML = '';
-                campionatiCache.forEach(item => {
+                campionati.forEach(item => {
                     const card = document.createElement('div');
-                    card.id = \`card-\${item.campionato.replace(/\\s+/g, '-')}\`;
-                    card.className = "amoled-card rounded-xl p-4 transition duration-200 flex flex-col gap-3";
+                    card.id = \`card-\${pulisciId(item.campionato)}\`;
+                    card.className = "amoled-card rounded-xl p-4 transition duration-200 cursor-pointer select-none flex flex-col gap-2";
                     
-                    // Colore badge di aggiornamento
-                    const badgeColore = item.aggiornato ? "text-cyan-400 bg-cyan-950/40" : "text-zinc-600 bg-zinc-950/40";
+                    // Al click selezioniamo/deselezioniamo il campionato
+                    card.onclick = (e) => {
+                        // Impedisce la selezione se si sta cliccando dentro l'area dei risultati già pronti
+                        if (e.target.closest('.dettagli-backtest-box')) return;
+                        togglaSelezioneCampionato(item.campionato);
+                    };
+
+                    const badgeColore = item.aggiornato ? "text-emerald-400 bg-emerald-950/40" : "text-zinc-600 bg-zinc-950/40";
                     const badgeTesto = item.aggiornato ? "CALIBRATO" : "IN ATTESA";
 
                     card.innerHTML = \`
-                        <div class="flex justify-between items-center">
+                        <div class="flex justify-between items-center shrink-0">
                             <div>
-                                <h3 class="text-sm font-black uppercase text-white tracking-wide">\${item.campionato}</h3>
-                                <p class="text-[9px] text-zinc-500 font-semibold uppercase tracking-wider mt-0.5">
+                                <h3 class="text-sm font-black uppercase text-white tracking-wide font-semibold flex items-center gap-2">
+                                    <span id="select-indicator-\${pulisciId(item.campionato)}" class="hidden text-[#00e5ff] text-xs">●</span>
+                                    \${item.campionato}
+                                </h3>
+                                <p class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider mt-0.5" id="desc-\${pulisciId(item.campionato)}">
                                     Ultimo Match: \${item.ultima_partita || "-"} | Match: \${item.totale_match}
                                 </p>
                             </div>
-                            <div class="text-right">
-                                <span class="text-[8px] font-black px-2 py-1 rounded \${badgeColore} tracking-widest uppercase">
+                            <div>
+                                <span id="badge-\${pulisciId(item.campionato)}" class="text-[8px] font-black px-2 py-0.5 rounded \${badgeColore} tracking-widest uppercase">
                                     \${badgeTesto}
                                 </span>
                             </div>
                         </div>
-                        <div class="flex gap-2 mt-1">
-                            <button onclick="avviaMotoreBacktest('\${item.campionato}')" class="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 text-black font-black py-2 rounded-lg text-[10px] uppercase tracking-widest transition shadow-lg">
-                                Avvia Backtest
-                            </button>
-                            <button onclick="calibraLiveSingolo('\${item.campionato}')" class="px-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-lg text-[10px] font-black uppercase tracking-widest text-zinc-300">
-                                Calibra Live
-                            </button>
+
+                        <!-- MICRO PANNELLO PROGRESSO IN LINEA (NASCOSTO DI BASE) -->
+                        <div id="progresso-box-\${pulisciId(item.campionato)}" class="hidden border-t border-zinc-900 pt-3 mt-2 space-y-1.5">
+                            <div class="flex justify-between items-center text-[8px] uppercase tracking-wider font-bold">
+                                <span class="text-zinc-500">Avanzamento Simulazione</span>
+                                <span id="progresso-txt-\${pulisciId(item.campionato)}" class="neon-cyan">0.0%</span>
+                            </div>
+                            <div class="w-full bg-zinc-950 h-1.5 rounded-full overflow-hidden border border-zinc-900">
+                                <div id="progresso-bar-\${pulisciId(item.campionato)}" class="h-full progress-bar-fill" style="width: 0%"></div>
+                            </div>
+                            <p id="progresso-match-\${pulisciId(item.campionato)}" class="text-[8px] text-zinc-500 truncate uppercase mt-1">
+                                Preparazione dati in corso...
+                            </p>
+                        </div>
+
+                        <!-- FISARMONICA RISULTATI POST-CALCOLO (ACCORDION INTERNO ALLA CARD) -->
+                        <div id="dettagli-box-\${pulisciId(item.campionato)}" class="hidden dettagli-backtest-box border-t border-zinc-900 pt-3 mt-3 space-y-3">
+                            <div class="grid grid-cols-2 gap-2 text-center">
+                                <div class="bg-black p-2 rounded border border-zinc-900">
+                                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Segnalate</span>
+                                    <span id="det-consigliate-\${pulisciId(item.campionato)}" class="text-xs font-black text-emerald-400">-</span>
+                                </div>
+                                <div class="bg-black p-2 rounded border border-zinc-900">
+                                    <span class="text-[8px] text-zinc-500 block uppercase font-bold">Precisione</span>
+                                    <span id="det-precisione-\${pulisciId(item.campionato)}" class="text-xs font-black text-cyan-400">-</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Griglia mini a comparsa dei 22 mercati -->
+                            <div id="det-griglia-\${pulisciId(item.campionato)}" class="grid grid-cols-3 gap-1.5 pt-1">
+                                <!-- Generato all'istante -->
+                            </div>
                         </div>
                     \`;
                     container.appendChild(card);
                 });
             } catch (err) {
-                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">Errore di comunicazione: \${err.message}</div>\`;
+                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CONNESSIONE: \${err.message}</div>\`;
             }
         }
 
-        // 2. BACKTEST CON STREAMING REAL-TIME (SSE)
-        function avviaMotoreBacktest(campionato) {
-            // Selezioniamo visivamente la card per dare riscontro
-            const cardId = \`card-\${campionato.replace(/\\s+/g, '-')}\`;
+        // Toggles selection on cards
+        function togglaSelezioneCampionato(campionato) {
+            const idx = campionatiSelezionati.indexOf(campionato);
+            const cardId = \`card-\${pulisciId(campionato)}\`;
+            const indicatorId = \`select-indicator-\${pulisciId(campionato)}\`;
+            
             const card = document.getElementById(cardId);
-            if (card) card.className = "amoled-card rounded-xl p-4 transition duration-200 border-neon";
+            const indicator = document.getElementById(indicatorId);
 
-            // Attiviamo l'interfaccia streaming superiore
-            const sseContainer = document.getElementById('sse-progress-container');
-            const staticStats = document.getElementById('home-static-stats');
-            sseContainer.classList.remove('hidden');
-            staticStats.classList.add('hidden');
+            if (idx === -1) {
+                campionatiSelezionati.push(campionato);
+                if (card) card.classList.add('glow-border');
+                if (indicator) indicator.classList.remove('hidden');
+            } else {
+                campionatiSelezionati.splice(idx, 1);
+                if (card) card.classList.remove('glow-border');
+                if (indicator) indicator.classList.add('hidden');
+            }
 
-            document.getElementById('sse-count-match').textContent = "0 / 0";
-            document.getElementById('sse-percent').textContent = "0.0%";
-            document.getElementById('sse-current-match').textContent = "AVVIO CANALE STREAMING WORKER...";
-
-            // Disattiviamo temporaneamente i bottoni per evitare richieste multiple
-            document.querySelectorAll('button').forEach(b => b.disabled = true);
-
-            // Apriamo la connessione SSE al Worker
-            if (sseSource) sseSource.close();
-            sseSource = new EventSource(\`/backtest?campionato=\${encodeURIComponent(campionato)}\`);
-
-            sseSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-
-                if (data.type === "progress") {
-                    document.getElementById('sse-count-match').textContent = \`\${data.elaborati} / \${data.totale}\`;
-                    document.getElementById('sse-percent').textContent = data.percentuale + "%";
-                    document.getElementById('sse-current-match').textContent = data.ultimoMatch.toUpperCase();
-                } 
-                
-                else if (data.type === "complete") {
-                    sseSource.close();
-                    finalizzaUIBacktest(data.report);
-                } 
-                
-                else if (data.type === "error") {
-                    sseSource.close();
-                    alert("Errore calcolo: " + data.message);
-                    ripristinaControlli();
-                }
-            };
-
-            sseSource.onerror = function() {
-                sseSource.close();
-                alert("Canale di streaming interrotto improvvisamente dal server.");
-                ripristinaControlli();
-            };
+            aggiornaBottoneAvvioSoglie();
         }
 
-        function finalizzaUIBacktest(report) {
-            ripristinaControlli();
+        function aggiornaBottoneAvvioSoglie() {
+            const btn = document.getElementById('btn-global-avvia');
+            const countLabel = document.getElementById('selezione-counter');
 
-            // Nascondiamo l'SSE
-            document.getElementById('sse-progress-container').classList.add('hidden');
-            document.getElementById('home-static-stats').classList.remove('hidden');
+            countLabel.textContent = \`\${campionatiSelezionati.length} SELEZIONATI\`;
 
-            // Cambiamo tab visualizzando i risultati di backtest
-            cambiaTab('risultati');
+            if (campionatiSelezionati.length > 0) {
+                btn.disabled = false;
+                btn.className = "flex flex-col items-center justify-center w-16 h-16 bg-gradient-to-b from-[#121212] to-[#000] border border-[#00e5ff]/50 rounded-full text-cyan-400 shadow-[0_0_15px_rgba(0,229,255,0.3)] cursor-pointer -translate-y-3 transition duration-200 hover:border-[#00e5ff] hover:shadow-[0_0_20px_rgba(0,229,255,0.4)]";
+            } else {
+                btn.disabled = true;
+                btn.className = "flex flex-col items-center justify-center w-16 h-16 bg-gradient-to-b from-zinc-900 to-black border border-zinc-800 rounded-full text-zinc-600 cursor-not-allowed shadow-lg -translate-y-3 transition duration-200";
+            }
+        }
 
-            document.getElementById('backtest-campionato-nome').textContent = report.campionato;
-            document.getElementById('res-partite').textContent = report.partite_analizzate;
-            document.getElementById('res-consigliate').textContent = report.riepilogo_generale.totale_consigliate;
-            document.getElementById('res-precisione').textContent = report.riepilogo_generale.precisione_media + "%";
+        // 3. ESECUZIONE DEL MOTORE DI CALCOLO SEQUENZIALE
+        async function avviaCalcoloSelezionati() {
+            if (campionatiSelezionati.length === 0) return;
 
-            const container = document.getElementById('risultati-esiti-container');
-            container.innerHTML = '';
+            const campionatiDaElaborare = [...campionatiSelezionati];
+            
+            // Ripristiniamo la selezione prima di partire per bloccare la UI
+            disabilitaInterfacciaCompletamente(true);
 
-            Object.keys(report.esiti).forEach(mercato => {
-                const dati = report.esiti[mercato];
-                const card = document.createElement('div');
-                card.className = "amoled-card rounded-xl p-3 flex justify-between items-center";
+            for (const camp of campionatiDaElaborare) {
+                await elaboraCampionatoInStreaming(camp);
+            }
 
+            disabilitaInterfacciaCompletamente(false);
+            campionatiSelezionati = [];
+            aggiornaBottoneAvvioSoglie();
+            await caricaSoglieLiveFisarmonica(); // Rinfresca il visualizzatore globale
+        }
+
+        function elaboraCampionatoInStreaming(campionato) {
+            return new Promise((resolve) => {
+                const idCamp = pulisciId(campionato);
+                
+                // Mostra il blocco di progresso all'interno della card
+                document.getElementById(\`progresso-box-\${idCamp}\`).classList.remove('hidden');
+                document.getElementById(\`dettagli-box-\${idCamp}\`).classList.add('hidden'); // Chiude eventuali risultati vecchi
+
+                // Avvia connessione SSE
+                if (currentSseConnection) currentSseConnection.close();
+                currentSseConnection = new EventSource(\`/backtest?campionato=\${encodeURIComponent(campionato)}\`);
+
+                currentSseConnection.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type === "progress") {
+                        document.getElementById(\`progresso-txt-\${idCamp}\`).textContent = data.percentuale + "%";
+                        document.getElementById(\`progresso-bar-\${idCamp}\`).style.width = data.percentuale + "%";
+                        document.getElementById(\`progresso-match-\${idCamp}\`).textContent = data.ultimoMatch.toUpperCase();
+                    } 
+                    
+                    else if (data.type === "complete") {
+                        currentSseConnection.close();
+                        
+                        // Nascondi barra progresso, aggiorna badge e popola accordion interno
+                        document.getElementById(\`progresso-box-\${idCamp}\`).classList.add('hidden');
+                        
+                        const badge = document.getElementById(\`badge-\${idCamp}\\`);
+                        badge.className = "text-[8px] font-black px-2 py-0.5 rounded text-emerald-400 bg-emerald-950/40 tracking-widest uppercase";
+                        badge.textContent = "CALIBRATO";
+
+                        visualizzaDettagliRisultatiCard(campionato, data.report);
+                        resolve();
+                    } 
+                    
+                    else if (data.type === "error") {
+                        currentSseConnection.close();
+                        alert("Errore calcolo " + campionato + ": " + data.message);
+                        document.getElementById(\`progresso-box-\${idCamp}\`).classList.add('hidden');
+                        resolve();
+                    }
+                };
+
+                currentSseConnection.onerror = function() {
+                    currentSseConnection.close();
+                    document.getElementById(\`progresso-box-\${idCamp}\`).classList.add('hidden');
+                    resolve();
+                };
+            });
+        }
+
+        function visualizzaDettagliRisultatiCard(campionato, report) {
+            const idCamp = pulisciId(campionato);
+            
+            // Salviamo i risultati in memoria per consultarli in seguito
+            backtestResults[campionato] = report;
+
+            document.getElementById(\`det-consigliate-\${idCamp}\`).textContent = report.riepilogo_generale.totale_consigliate;
+            document.getElementById(\`det-precisione-\${idCamp}\`).textContent = report.riepilogo_generale.precisione_media + "%";
+
+            const griglia = document.getElementById(\`det-griglia-\${idCamp}\`);
+            griglia.innerHTML = '';
+
+            // Generiamo un badge mini per ognuno dei 22 mercati simulati
+            Object.keys(report.esiti).forEach(m => {
+                const dati = report.esiti[m];
+                const item = document.createElement('div');
+                item.className = "bg-black p-1 text-center rounded border border-zinc-900";
+                
                 let coloreTesto = "text-[#00e5ff]";
                 if (dati.precisione_percentuale < 55) coloreTesto = "text-red-500";
                 else if (dati.precisione_percentuale < 70) coloreTesto = "text-amber-500";
 
-                card.innerHTML = \`
-                    <div>
-                        <span class="text-xs font-black uppercase text-white tracking-wide">\${mercato.toUpperCase()}</span>
-                        <span class="text-[8px] text-zinc-500 font-bold block mt-0.5">
-                            SUGGERITI: \${dati.consigliate} | VINTE: \${dati.vinte}
-                        </span>
-                    </div>
-                    <div class="text-right">
-                        <span class="text-sm font-black \${coloreTesto}">
-                            \${dati.precisione_percentuale.toFixed(1)}%
-                        </span>
-                    </div>
+                item.innerHTML = \`
+                    <div class="text-[7px] text-zinc-500 font-bold uppercase truncate">\${m}</div>
+                    <div class="text-[9px] font-bold \${coloreTesto}">\${dati.precisione_percentuale.toFixed(0)}%</div>
                 \`;
-                container.appendChild(card);
+                griglia.appendChild(item);
             });
+
+            // Apriamo visivamente la fisarmonica dei risultati
+            document.getElementById(\`dettagli-box-\${idCamp}\`).classList.remove('hidden');
         }
 
-        function ripristinaControlli() {
-            document.querySelectorAll('button').forEach(b => b.disabled = false);
-            campionatiCache.forEach(item => {
-                const cardId = \`card-\${item.campionato.replace(/\\s+/g, '-')}\`;
-                const card = document.getElementById(cardId);
-                if (card) card.className = "amoled-card rounded-xl p-4 transition duration-200 flex flex-col gap-3";
-            });
+        function disabilitaInterfacciaCompletamente(stato) {
+            document.querySelectorAll('button').forEach(b => b.disabled = stato);
+            document.getElementById('nav-btn-home').disabled = false;
+            document.getElementById('nav-btn-soglie').disabled = false;
         }
 
-        // 3. SEZIONE SOGLIE LIVE (FISARMONICA / ACCORDION COMPLETO)
-        async function scaricaSoglieGlobali() {
-            const container = document.getElementById('soglie-globali-container');
+        // 4. SEZIONE: SFOGLIATORE GLOBALE DELLE SOGLIE LIVE (TAB 2)
+        async function caricaSoglieLiveFisarmonica() {
+            const container = document.getElementById('soglie-accordions-container');
             try {
                 const res = await fetch('/api/tutte-soglie');
-                soglieCache = await res.json();
+                datiSoglieOperative = await res.json();
 
-                if (soglieCache.length === 0) {
-                    container.innerHTML = \`<div class="text-center py-10 text-zinc-500 text-xs font-bold uppercase">Nessuna soglia calcolata nel database.</div>\`;
+                if (datiSoglieOperative.length === 0) {
+                    container.innerHTML = \`<div class="py-12 text-center text-zinc-600 text-xs font-black uppercase">Nessuna soglia calibrata presente nel database.</div>\`;
                     return;
                 }
 
-                costruisciFisarmonicaSoglie(soglieCache);
+                renderizzaAccordionSoglie(datiSoglieOperative);
             } catch (err) {
-                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">Errore caricamento soglie: \${err.message}</div>\`;
+                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE CARICAMENTO SOGLIE: \${err.message}</div>\`;
             }
         }
 
-        function costruisciFisarmonicaSoglie(listaSoglie) {
-            const container = document.getElementById('soglie-globali-container');
+        function renderizzaAccordionSoglie(lista) {
+            const container = document.getElementById('soglie-accordions-container');
             container.innerHTML = '';
 
-            listaSoglie.forEach((item, index) => {
-                const wrapper = document.createElement('div');
-                wrapper.className = "amoled-card rounded-xl overflow-hidden item-soglia-filtro";
-                wrapper.dataset.campionato = item.campionato.toLowerCase();
+            lista.forEach((item, index) => {
+                const el = document.createElement('div');
+                el.className = "amoled-card rounded-xl overflow-hidden dynamic-soglia-item";
+                el.dataset.campionato = item.campionato.toLowerCase();
 
-                // Esiti aggregati per visualizzazione rapida
-                wrapper.innerHTML = \`
-                    <!-- Intestazione cliccabile della fisarmonica -->
-                    <button onclick="toggleAccordion(\${index})" class="w-full text-left px-4 py-4 flex justify-between items-center hover:bg-zinc-950 transition">
+                el.innerHTML = \`
+                    <!-- Testata fisarmonica -->
+                    <button onclick="togglaSezioneFisarmonica(\${index})" class="w-full text-left p-4 hover:bg-zinc-950 transition flex justify-between items-center">
                         <div>
                             <span class="text-xs font-black uppercase text-white tracking-wide">\${item.campionato}</span>
-                            <span class="text-[8px] text-zinc-500 font-bold block mt-0.5 uppercase tracking-widest">
-                                Aggiornato il: \${item.date_aggiornamento}
-                            </span>
+                            <span class="text-[8px] text-zinc-500 font-bold block mt-0.5">AGGIORNATO IL: \${item.date_aggiornamento}</span>
                         </div>
-                        <div class="flex items-center gap-3">
-                            <span class="text-[8px] font-black text-cyan-400 bg-cyan-950/40 px-2 py-0.5 rounded tracking-widest">SFOGLIA</span>
-                            <svg id="arrow-\${index}" class="h-4 w-4 text-zinc-500 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-                            </svg>
-                        </div>
+                        <svg id="soglie-arrow-\${index}" class="h-4 w-4 text-zinc-500 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                        </svg>
                     </button>
-                    
-                    <!-- Corpo espandibile con i 22 esiti -->
-                    <div id="body-\${index}" class="hidden p-4 border-t border-zinc-900 bg-black grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        \${costruisciGriglia22Soglie(item)}
+                    <!-- Corpo soglie -->
+                    <div id="soglie-body-\${index}" class="hidden p-4 border-t border-zinc-900 bg-black grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        \${costruisciGriglia22SoglieEngine(item)}
                     </div>
                 \`;
-                container.appendChild(wrapper);
+                container.appendChild(el);
             });
         }
 
-        function costruisciGriglia22Soglie(sogliaData) {
+        function costruisciGriglia22SoglieEngine(item) {
             let html = '';
-            const mercatiNomi = Object.keys(sogliaData).filter(k => k.startsWith('soglia_'));
+            const chiaviSoglia = Object.keys(item).filter(k => k.startsWith('soglia_'));
 
-            mercatiNomi.forEach(key => {
+            chiaviSoglia.forEach(key => {
                 const nomeMercato = key.replace('soglia_', '').toUpperCase();
-                const valore = sogliaData[key];
+                const valore = item[key];
                 const bloccato = valore >= 100;
 
                 html += \`
-                    <div class="bg-[#0a0a0b] p-2.5 rounded-lg border border-zinc-900 text-center">
-                        <div class="text-[8px] text-zinc-500 font-bold uppercase">\${nomeMercato}</div>
-                        <div class="text-xs font-black mt-1 \${bloccato ? 'text-red-500' : 'text-cyan-400'}">
+                    <div class="bg-[#060608] p-2 rounded-lg border border-zinc-950 text-center">
+                        <span class="text-[7px] text-zinc-500 font-bold uppercase block">\${nomeMercato}</span>
+                        <span class="text-xs font-black block mt-0.5 \${bloccato ? 'text-red-500' : 'text-cyan-400'}">
                             \${bloccato ? 'BLOCKED' : valore.toFixed(1) + '%'}
-                        </div>
+                        </span>
                     </div>
                 \`;
             });
             return html;
         }
 
-        function toggleAccordion(index) {
-            const body = document.getElementById(\`body-\${index}\`);
-            const arrow = document.getElementById(\`arrow-\${index}\`);
+        function togglaSezioneFisarmonica(idx) {
+            const body = document.getElementById(\`soglie-body-\${idx}\`);
+            const arrow = document.getElementById(\`soglie-arrow-\${idx}\`);
 
             if (body.classList.contains('hidden')) {
                 body.classList.remove('hidden');
@@ -1058,13 +999,13 @@ function ottieniHTMLDashboardEngine() {
             }
         }
 
-        function filtraSoglieInDiretta() {
-            const query = document.getElementById('filtro-soglie').value.toLowerCase();
-            const elementi = document.querySelectorAll('.item-soglia-filtro');
-
-            elementi.forEach(el => {
-                const nomeCamp = el.dataset.campionato;
-                if (nomeCamp.includes(query)) {
+        function filtraSoglie() {
+            const query = document.getElementById('cerca-soglie-input').value.toLowerCase();
+            const items = document.querySelectorAll('.dynamic-soglia-item');
+            
+            items.forEach(el => {
+                const nome = el.dataset.campionato;
+                if (nome.includes(query)) {
                     el.classList.remove('hidden');
                 } else {
                     el.classList.add('hidden');
@@ -1072,65 +1013,63 @@ function ottieniHTMLDashboardEngine() {
             });
         }
 
-        // 4. NAVIGAZIONE INTERNA TRA TAB
-        function cambiaTab(tabNome) {
+        // 5. CAMBIO TAB DI NAVIGAZIONE
+        function navigaTab(tabNome) {
             document.getElementById('tab-home').classList.add('hidden');
             document.getElementById('tab-soglie').classList.add('hidden');
-            document.getElementById('tab-risultati').classList.add('hidden');
-
+            
             document.getElementById(\`tab-\${tabNome}\`).classList.remove('hidden');
 
-            // Reset visivo pulsanti menu
-            document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition";
-            document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition";
-            document.getElementById('nav-btn-nitro').className = "flex flex-col items-center justify-center w-16 h-12 text-zinc-500 hover:text-white transition";
+            document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-white transition";
+            document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-14 h-12 text-zinc-500 hover:text-white transition";
 
             if (tabNome === 'home') {
-                document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-16 h-12 text-cyan-400 transition";
+                document.getElementById('nav-btn-home').className = "flex flex-col items-center justify-center w-14 h-12 text-cyan-400 transition";
             } else if (tabNome === 'soglie') {
-                document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-16 h-12 text-cyan-400 transition";
-                scaricaSoglieGlobali(); // rinfresca il visualizzatore globale
+                document.getElementById('nav-btn-soglie').className = "flex flex-col items-center justify-center w-14 h-12 text-cyan-400 transition";
+                caricaSoglieLiveFisarmonica();
             }
         }
 
-        function tornaAllaHome() {
-            cambiaTab('home');
-        }
-
-        // 5. CALIBRAZIONI LIVE INDIVIDUALI O GENERALI
-        async function calibraLiveSingolo(campionato) {
-            if (!confirm("Ricalcolare ora le soglie live giornaliere di: " + campionato + "?")) return;
-            try {
-                const res = await fetch(\`/run-live?campionato=\${encodeURIComponent(campionato)}\`);
-                alert("Processo pianificato. Tra qualche secondo aggiorna per vedere lo stato.");
-                await scaricaDatiIniziali();
-            } catch (err) {
-                alert("Errore: " + err.message);
-            }
-        }
-
-        async function lanciaNitroBulk() {
-            if (!confirm("Ricalcolare le soglie live per tutti i campionati in background?")) return;
+        // Calibrazione nitro massiva in background
+        async function forzaCalibrazioneBackgroundCompleta() {
+            if (!confirm("Desideri lanciare la calibrazione 'NITRO' per tutti i campionati attivi? L'operazione avverrà in background.")) return;
             try {
                 const res = await fetch('/run-live');
-                alert("Nitro avviato con successo in background su Cloudflare.");
+                alert("Processo Nitro avviato correttamente in background su Cloudflare.");
             } catch (err) {
                 alert("Errore Nitro: " + err.message);
             }
         }
 
-        function eseguiResetGenerale() {
-            if (sseSource) sseSource.close();
-            resetUICompletamente();
-            scaricaDatiIniziali();
+        // Reset completo della sessione
+        function resetGeneraleEngine() {
+            if (currentSseConnection) currentSseConnection.close();
+            campionatiSelezionati = [];
+            backtestResults = {};
+            aggiornaBottoneAvvioSoglie();
+            
+            // Ripristino grafico di tutte le card
+            campionati.forEach(item => {
+                const idCamp = pulisciId(item.campionato);
+                const card = document.getElementById(\`card-\${idCamp}\`);
+                const indicator = document.getElementById(\`select-indicator-\${idCamp}\`);
+                
+                if (card) card.className = "amoled-card rounded-xl p-4 transition duration-200 cursor-pointer select-none flex flex-col gap-2";
+                if (indicator) indicator.classList.add('hidden');
+                
+                const progressoBox = document.getElementById(\`progresso-box-\${idCamp}\`);
+                const dettagliBox = document.getElementById(\`dettagli-box-\${idCamp}\`);
+                
+                if (progressoBox) progressoBox.classList.add('hidden');
+                if (dettagliBox) dettagliBox.classList.add('hidden');
+            });
+
+            navigaTab('home');
         }
 
-        function resetUICompletamente() {
-            document.getElementById('sse-progress-container').classList.add('hidden');
-            document.getElementById('home-static-stats').classList.remove('hidden');
-            document.getElementById('home-static-stats').textContent = "SISTEMA PRONTO PER L'ELABORAZIONE";
-            document.querySelectorAll('button').forEach(b => b.disabled = false);
-            cambiaTab('home');
+        function pulisciId(str) {
+            return str.replace(/[^a-zA-Z0-9]/g, '-');
         }
     </script>
 </body>
