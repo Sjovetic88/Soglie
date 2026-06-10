@@ -1,5 +1,5 @@
 /**
- * CLOUDFLARE WORKER: SOGLIE & BACKTEST CON INTERFACCIA GRAFICA INTEGRATA
+ * CLOUDFLARE WORKER: SOGLIE & BACKTEST CON INTERFACCIA GRAFICA "ENGINE"
  * 
  * Legge da: DB_PRONOSTICI (pronostici_partite) - ID: 6f393ca6-0ebc-4f37-98db-3df8857222ed
  * Scrive in: DB_SOGLIE (soglie_campionati) - ID: 6bde4e75-41f2-40c1-85e7-4abd5a045043
@@ -11,15 +11,15 @@ export default {
       const url = new URL(request.url);
       const path = url.pathname;
 
-      // 1. ENDPOINT: Interfaccia Grafica Principale (Dashboard HTML/CSS/JS)
+      // 1. INTERFACCIA GRAFICA: Dashboard AMOLED Black (Stile Engine App)
       if (path === "/" || path === "/index.html") {
-        return new Response(ottieniHTMLDashboard(), {
+        return new Response(ottieniHTMLDashboardEngine(), {
           status: 200,
           headers: { "Content-Type": "text/html;charset=UTF-8" }
         });
       }
 
-      // 2. ENDPOINT: API per ottenere la lista dinamica dei campionati per la tendina
+      // 2. API: Estrazione dei campionati per la tendina a comparsa
       if (path === "/api/campionati") {
         const query = `SELECT DISTINCT campionato FROM validazione_risultati WHERE campionato IS NOT NULL ORDER BY campionato ASC;`;
         const { results } = await env.DB_PRONOSTICI.prepare(query).all();
@@ -27,17 +27,17 @@ export default {
         return responseJSON(lista);
       }
 
-      // 3. ENDPOINT: API per leggere le soglie attive attuali di un campionato
+      // 3. API: Lettura delle soglie operative attuali
       if (path === "/api/soglie-attive") {
         const campionato = url.searchParams.get("campionato");
         if (!campionato) return responseJSON({ error: "Campionato mancante" }, 400);
 
         const query = `SELECT * FROM soglie_attive WHERE campionato = ?;`;
         const result = await env.DB_SOGLIE.prepare(query).bind(campionato).first();
-        return responseJSON(result || { messaggio: "Nessuna soglia attiva calcolata per questo campionato." });
+        return responseJSON(result || { messaggio: "Nessuna soglia attiva registrata." });
       }
 
-      // 4. ENDPOINT: Esecuzione Backtest Storico
+      // 4. API: Esecuzione del Backtest Storico
       if (path === "/backtest") {
         const campionato = url.searchParams.get("campionato");
         if (!campionato) return responseJSON({ error: "Parametro 'campionato' mancante" }, 400);
@@ -46,7 +46,7 @@ export default {
         return responseJSON(report);
       }
 
-      // 5. ENDPOINT: Forzatura manuale calibrazione Live di tutti i campionati
+      // 5. API: Ricalcolo Live di tutti i campionati
       if (path === "/run-live") {
         ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
         return responseJSON({ status: "Calibrazione live avviata in background per tutti i campionati" });
@@ -59,7 +59,6 @@ export default {
     }
   },
 
-  // Esecuzione automatica notturna tramite Cron Trigger alle 00:00
   async scheduled(event, env, ctx) {
     console.log("Inizio calibrazione notturna pianificata...");
     ctx.waitUntil(eseguiCalibrazioneLiveTuttiCampionati(env));
@@ -67,7 +66,7 @@ export default {
 };
 
 // ==========================================
-// FUNZIONI DI SUPPORTO DI RISPOSTA
+// SUPPORTO RISPOSTE E UTILITY
 // ==========================================
 
 function responseJSON(data, status = 200) {
@@ -75,13 +74,13 @@ function responseJSON(data, status = 200) {
     status,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*" // Consente l'accesso anche in ambiente locale se necessario
+      "Access-Control-Allow-Origin": "*"
     }
   });
 }
 
 // ==========================================
-// FUNZIONI CORE ARCHITETTURALI
+// MOTORE MATEMATICO & DATABASE CALCOLI
 // ==========================================
 
 async function eseguiCalibrazioneLiveTuttiCampionati(env) {
@@ -101,7 +100,7 @@ async function eseguiCalibrazioneLiveTuttiCampionati(env) {
       await salvaSogliaAttiva(campionato, oggiYMD, calibrazioneOttimale.soglie, env);
       await cacheCalibrazioneGiornaliera(campionato, oggiYMD, calibrazioneOttimale, env);
     } catch (err) {
-      console.error(`Errore nel live del campionato ${campionato}:`, err);
+      console.error(`Errore nel live di ${campionato}:`, err);
     }
   }
 }
@@ -115,7 +114,7 @@ async function eseguiBacktestStorico(campionato, env) {
   const { results: tuttiMatch } = await env.DB_PRONOSTICI.prepare(queryTuttiMatch).bind(campionato).all();
 
   if (tuttiMatch.length < 150) {
-    return { error: "Dati storici insufficienti per eseguire un backtest (servono almeno 150 match)." };
+    return { error: "Dati insufficienti per il backtest (servono almeno 150 match)." };
   }
 
   const cacheCalibrazioni = await caricaCacheCalibrazioni(campionato, env);
@@ -175,7 +174,7 @@ async function eseguiBacktestStorico(campionato, env) {
 }
 
 // ==========================================
-// MOTORE MATEMATICO DI CALCOLO
+// LOGICA MATEMATICA CORE
 // ==========================================
 
 const LISTA_MERCATI = [
@@ -385,7 +384,7 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 }
 
 // ==========================================
-// FUNZIONI DI GESTIONE DEI DATI E DEI DATABASE
+// FUNZIONI DI GESTIONE DATI & DB
 // ==========================================
 
 async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
@@ -579,282 +578,379 @@ function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCal
 }
 
 // ==========================================
-// INTERFACCIA WEB (DASHBOARD HTML)
+// INTERFACCIA GRAFICA INTERATTIVA (AMOLED BLACK ENGINE)
 // ==========================================
 
-function ottieniHTMLDashboard() {
+function ottieniHTMLDashboardEngine() {
   return `
 <!DOCTYPE html>
 <html lang="it">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Soglie & Backtest Dashboard</title>
-    <!-- Tailwind CSS per un design ultra-moderno -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SOGLIE & BACKTEST ENGINE</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #000000;
+            color: #ffffff;
+            -webkit-tap-highlight-color: transparent;
+        }
+        /* AMOLED Card Design */
+        .engine-card {
+            background-color: #0d0d0d;
+            border: 1px solid #1a1a1c;
+        }
+        /* Neon text pulse effect */
+        .neon-accent {
+            color: #00e5ff;
+            text-shadow: 0 0 10px rgba(0, 229, 255, 0.2);
+        }
+        /* Bottom navigation shadow */
+        .bottom-dock {
+            background-color: #000000;
+            border-top: 1px solid #1c1c1e;
+        }
+        /* Hide scrollbars but keep functionality */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 min-h-screen">
+<body class="overflow-x-hidden min-h-screen pb-24">
 
-    <div class="container mx-auto px-4 py-8">
-        
-        <!-- HEADER -->
-        <header class="flex flex-col md:flex-row justify-between items-center mb-8 border-b border-gray-800 pb-6 gap-4">
-            <div>
-                <h1 class="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-blue-500">
-                    Soglie & Backtest
-                </h1>
-                <p class="text-gray-400 text-sm mt-1">Calibrazione Dinamica ed Elaborazione in Memoria senza Bias</p>
+    <!-- CONTENITORE CENTRALE -->
+    <div class="max-w-md mx-auto px-4 pt-6">
+
+        <!-- INTESTAZIONE PRINCIPALE STILE APP GOLDBET -->
+        <header class="text-center mb-6">
+            <h1 class="text-2xl font-black uppercase tracking-wider mb-1">
+                SOGLIE <span class="neon-accent">ENGINE</span>
+            </h1>
+            <div id="stato-allineamento" class="text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-1">
+                SELEZIONA COMPETIZIONE PER INIZIARE
             </div>
-            <div class="flex gap-3">
-                <button onclick="forzaCalibrazioneLive()" class="bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition shadow-lg">
-                    Ricalcola Soglie Live (Tutti)
-                </button>
+            <div id="data-ultimo-calcolo" class="text-[10px] text-gray-400 font-semibold tracking-wider uppercase">
+                ULTIMA ELABORAZIONE: -
             </div>
         </header>
 
-        <!-- CONTROLLO PRINCIPALE -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-            
-            <!-- SELEZIONE CAMPIONATO -->
-            <div class="bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700/50 flex flex-col justify-between">
-                <div>
-                    <h2 class="text-lg font-bold text-teal-400 mb-2">1. Seleziona Competizione</h2>
-                    <p class="text-gray-400 text-xs mb-4">La lista è caricata dinamicamente dal tuo archivio storico.</p>
-                    <select id="select-campionato" onchange="caricaSoglieAttiveSelezionato()" class="w-full bg-gray-950 border border-gray-700 text-gray-100 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500">
-                        <option value="">Caricamento campionati...</option>
-                    </select>
-                </div>
-                <div class="mt-6">
-                    <button id="btn-backtest" onclick="avviaBacktest()" class="w-full bg-teal-500 hover:bg-teal-600 text-gray-950 font-bold py-3 rounded-lg text-sm transition shadow-md">
-                        Avvia Backtest Storico
-                    </button>
-                </div>
+        <!-- SEZIONE DEI 22 MERCATI (VISUALIZZATA IN DIRETTA) -->
+        <main class="space-y-2.5" id="contenuto-principale">
+            <!-- Messaggio di base prima della selezione -->
+            <div class="py-20 text-center text-gray-600">
+                <svg class="h-10 w-10 mx-auto text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                </svg>
+                <p class="text-xs font-bold uppercase tracking-wider">Nessun Campionato Selezionato</p>
+                <p class="text-[10px] text-gray-500 mt-1">Usa la barra inferiore [SELECT] per scegliere una lega.</p>
             </div>
-
-            <!-- CARD SOGLIE ATTIVE LIVE -->
-            <div class="lg:col-span-2 bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-700/50">
-                <h2 class="text-lg font-bold text-teal-400 mb-2">2. Soglie Attive di Oggi</h2>
-                <p class="text-gray-400 text-xs mb-4">Soglie applicate alle scommesse odierne per evitare mercati instabili.</p>
-                <div id="soglie-live-container" class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">
-                    <p class="text-gray-500 text-sm col-span-full py-4 text-center">Seleziona un campionato per vedere le soglie operative.</p>
-                </div>
-            </div>
-
-        </div>
-
-        <!-- AREA RISULTATI BACKTEST -->
-        <div id="sezione-risultati" class="hidden">
-            
-            <!-- PANNELLO DETTAGLIO STATISTICHE GENERALI -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div class="bg-gray-800/80 p-5 rounded-xl border border-gray-700">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider block mb-1">Partite Storiche Analizzate</span>
-                    <span id="stat-partite" class="text-3xl font-black text-white">-</span>
-                </div>
-                <div class="bg-gray-800/80 p-5 rounded-xl border border-gray-700">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider block mb-1">Raccomandazioni Generate</span>
-                    <span id="stat-consigliate" class="text-3xl font-black text-teal-400">-</span>
-                </div>
-                <div class="bg-gray-800/80 p-5 rounded-xl border border-gray-700">
-                    <span class="text-xs text-gray-400 font-semibold uppercase tracking-wider block mb-1">Precisione Media Modello</span>
-                    <span id="stat-precisione" class="text-3xl font-black text-blue-400">-</span>
-                </div>
-            </div>
-
-            <!-- TABELLA DI CONFRONTO DEI 22 ESITI -->
-            <div class="bg-gray-800 rounded-2xl border border-gray-700 overflow-hidden shadow-2xl">
-                <div class="p-5 border-b border-gray-700">
-                    <h3 class="font-bold text-lg text-white">Analisi Dettagliata per Singolo Esito</h3>
-                    <p class="text-gray-400 text-xs mt-1">Confronto delle prestazioni reali filtrate tramite le soglie calcolate.</p>
-                </div>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left border-collapse">
-                        <thead>
-                            <tr class="bg-gray-950 text-gray-400 text-xs uppercase tracking-wider border-b border-gray-800">
-                                <th class="p-4">Esito / Mercato</th>
-                                <th class="p-4">Suggerite</th>
-                                <th class="p-4">Vinte</th>
-                                <th class="p-4 text-right">Precisione Reale</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tabella-corpo" class="divide-y divide-gray-800 text-sm">
-                            <!-- Popolato via Javascript -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-        </div>
-
-        <!-- INDICATORE DI CARICAMENTO -->
-        <div id="loader" class="hidden flex-col items-center justify-center py-20">
-            <svg class="animate-spin h-12 w-12 text-teal-400 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            <p class="text-gray-400 text-sm animate-pulse">Elaborazione in corso nel Cloudflare Worker...</p>
-            <p class="text-gray-600 text-xs mt-1">Nessun sovraccarico sul database: calcolo interamente in memoria.</p>
-        </div>
+        </main>
 
     </div>
 
-    <!-- FUNZIONALITÀ FRONTEND -->
+    <!-- CASSETTO SELEZIONE CAMPIONATI (DRAWER SLIDE-UP) -->
+    <div id="drawer-campionati" class="fixed inset-y-0 inset-x-0 bg-black/80 backdrop-blur-sm z-50 transition-opacity duration-300 opacity-0 pointer-events-none">
+        <div class="absolute bottom-0 left-0 right-0 max-w-md mx-auto bg-[#0d0d0d] border-t border-zinc-800 rounded-t-3xl max-h-[80vh] flex flex-col transition-transform duration-300 translate-y-full">
+            <div class="p-4 border-b border-zinc-900 flex justify-between items-center shrink-0">
+                <span class="text-xs font-black uppercase text-gray-400 tracking-wider">Scegli Campionato</span>
+                <button onclick="chiudiDrawer()" class="text-gray-500 hover:text-white text-xs font-bold uppercase">Chiudi</button>
+            </div>
+            <div class="overflow-y-auto no-scrollbar p-3 space-y-1" id="drawer-lista-campionati">
+                <!-- Generato Dinamicamente -->
+            </div>
+        </div>
+    </div>
+
+    <!-- BARRA DI NAVIGAZIONE INFERIORE (BOTTOM DOCK) -->
+    <nav class="fixed bottom-0 left-0 right-0 max-w-md mx-auto z-40 bottom-dock h-16 flex items-center justify-around px-2">
+        
+        <!-- SELECT BUTTON -->
+        <button onclick="apriDrawer()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-white transition">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+            </svg>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Select</span>
+        </button>
+
+        <!-- PROCESS BUTTON -->
+        <button onclick="lanciaCalibrazioneLive()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-white transition">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89"></path>
+            </svg>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Live</span>
+        </button>
+
+        <!-- START (RUN BACKTEST) BUTTON -->
+        <button id="btn-start" onclick="eseguiBacktestEngine()" class="flex flex-col items-center justify-center w-14 h-14 bg-gradient-to-b from-[#121212] to-[#000] border border-[#1c1c1e] rounded-full text-zinc-400 hover:text-[#00e5ff] hover:border-[#00e5ff]/30 shadow-lg -translate-y-2 transition">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
+            </svg>
+        </button>
+
+        <!-- NITRO BUTTON (BULK RUN) -->
+        <button onclick="lanciaNitroBulk()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-[#ff9100] transition">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+            </svg>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Nitro</span>
+        </button>
+
+        <!-- RESET BUTTON -->
+        <button onclick="resetSchermata()" class="flex flex-col items-center justify-center w-12 h-12 text-gray-500 hover:text-red-500 transition">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+            </svg>
+            <span class="text-[8px] font-bold uppercase tracking-wider mt-1">Reset</span>
+        </button>
+
+    </nav>
+
+    <!-- LOGICA DI FUNZIONAMENTO FRONTEND -->
     <script>
-        // Al caricamento della pagina, scarichiamo la lista dei campionati disponibili
+        let campionatoSelezionato = "";
+        let listaCampionatiCached = [];
+
         window.addEventListener('DOMContentLoaded', async () => {
-            try {
-                const res = await fetch('/api/campionati');
-                const campionati = await res.json();
-                
-                const select = document.getElementById('select-campionato');
-                select.innerHTML = '<option value="">-- Scegli un campionato --</option>';
-                
-                campionati.forEach(c => {
-                    const opt = document.createElement('option');
-                    opt.value = c;
-                    opt.textContent = c;
-                    select.appendChild(opt);
-                });
-            } catch (err) {
-                alert("Errore nel caricamento dei campionati dal database: " + err.message);
-            }
+            await scaricaCampionati();
         });
 
-        // Legge le soglie attive oggi dal database "soglie_campionati"
-        async function caricaSoglieAttiveSelezionato() {
-            const campionato = document.getElementById('select-campionato').value;
-            const container = document.getElementById('soglie-live-container');
-            
-            if (!campionato) {
-                container.innerHTML = '<p class="text-gray-500 text-sm col-span-full py-4 text-center">Seleziona un campionato per vedere le soglie operative.</p>';
-                return;
-            }
-
-            container.innerHTML = '<p class="text-gray-400 text-sm col-span-full py-4 text-center animate-pulse">Caricamento soglie...</p>';
-
+        async function scaricaCampionati() {
             try {
-                const res = await fetch(\`/api/soglie-attive?campionato=\${encodeURIComponent(campionato)}\`);
-                const dati = await res.json();
-
-                if (dati.messaggio || dati.error) {
-                    container.innerHTML = \`<p class="text-amber-500 text-xs col-span-full py-4 text-center">\${dati.messaggio || dati.error}</p>\`;
-                    return;
-                }
-
-                container.innerHTML = '';
-                const mercatiMappa = Object.keys(dati)
-                    .filter(key => key.startsWith('soglia_'))
-                    .map(key => ({
-                        nome: key.replace('soglia_', '').toUpperCase(),
-                        valore: dati[key]
-                    }));
-
-                mercatiMappa.forEach(m => {
-                    const block = document.createElement('div');
-                    block.className = "bg-gray-950 p-3 rounded-lg border border-gray-800 text-center";
-                    
-                    // Se la soglia è impostata al 100%, significa che il semaforo per quel mercato era rosso
-                    const rosso = m.valore >= 100;
-                    
-                    block.innerHTML = \`
-                        <div class="text-[10px] text-gray-500 font-bold">\${m.nome}</div>
-                        <div class="text-lg font-black mt-1 \${rosso ? 'text-red-500' : 'text-teal-400'}">
-                            \${rosso ? 'BLOCKED' : m.valore + '%'}
-                        </div>
-                    \`;
-                    container.appendChild(block);
-                });
-
+                const res = await fetch('/api/campionati');
+                listaCampionatiCached = await res.json();
+                popolaDrawerCampionati();
             } catch (err) {
-                container.innerHTML = \`<p class="text-red-500 text-xs col-span-full py-4 text-center">Errore nel caricamento delle soglie: \${err.message}</p>\`;
+                console.error("Errore caricamento competizioni:", err);
             }
         }
 
-        // Avvia la simulazione storica
-        async function avviaBacktest() {
-            const campionato = document.getElementById('select-campionato').value;
-            if (!campionato) {
-                alert("Seleziona prima un campionato!");
+        function popolaDrawerCampionati() {
+            const container = document.getElementById('drawer-lista-campionati');
+            container.innerHTML = '';
+            listaCampionatiCached.forEach(c => {
+                const btn = document.createElement('button');
+                btn.className = "w-full text-left px-4 py-3 rounded-xl hover:bg-zinc-900 text-sm font-semibold transition text-gray-300 hover:text-white flex justify-between items-center border border-transparent hover:border-zinc-800";
+                btn.innerHTML = \`
+                    <span>\${c}</span>
+                    <span class="text-[10px] text-gray-600 uppercase tracking-widest font-black">Seleziona</span>
+                \`;
+                btn.onclick = () => selezionaCampionato(c);
+                container.appendChild(btn);
+            });
+        }
+
+        function apriDrawer() {
+            const drawer = document.getElementById('drawer-campionati');
+            const inner = drawer.querySelector('.absolute');
+            drawer.classList.remove('pointer-events-none', 'opacity-0');
+            drawer.classList.add('opacity-100');
+            inner.classList.remove('translate-y-full');
+            inner.classList.add('translate-y-0');
+        }
+
+        function chiudiDrawer() {
+            const drawer = document.getElementById('drawer-campionati');
+            const inner = drawer.querySelector('.absolute');
+            drawer.classList.remove('opacity-100');
+            drawer.classList.add('pointer-events-none', 'opacity-0');
+            inner.classList.remove('translate-y-0');
+            inner.classList.add('translate-y-full');
+        }
+
+        async function selezionaCampionato(c) {
+            campionatoSelezionato = c;
+            chiudiDrawer();
+
+            // Aggiorna intestazione
+            document.getElementById('stato-allineamento').textContent = c + " | IN ATTESA";
+            document.getElementById('stato-allineamento').className = "text-[10px] neon-accent font-bold uppercase tracking-widest mb-1";
+            
+            await caricaSoglieLiveEngine();
+        }
+
+        // Recupera le soglie operative di oggi e le renderizza in stile "Engine Card"
+        async function caricaSoglieLiveEngine() {
+            const container = document.getElementById('contenuto-principale');
+            container.innerHTML = \`
+                <div class="py-20 text-center animate-pulse text-zinc-500">
+                    <p class="text-xs font-bold uppercase tracking-widest">Caricamento in corso...</p>
+                </div>
+            \`;
+
+            try {
+                const res = await fetch(\`/api/soglie-attive?campionato=\${encodeURIComponent(campionatoSelezionato)}\`);
+                const dati = await res.json();
+
+                if (dati.messaggio || dati.error) {
+                    container.innerHTML = \`
+                        <div class="py-12 text-center text-amber-500/80 engine-card rounded-2xl p-6">
+                            <p class="text-xs font-bold uppercase tracking-wider">Nessun Dato Operativo</p>
+                            <p class="text-[10px] text-gray-500 mt-2">Le soglie odierne non sono ancora state calcolate. Usa il pulsante [LIVE] o [START] per avviare il motore.</p>
+                        </div>
+                    \`;
+                    return;
+                }
+
+                // Imposta l'ultimo calcolo
+                document.getElementById('data-ultimo-calcolo').textContent = "ULTIMA ELABORAZIONE: " + (dati.date_aggiornamento || "-");
+
+                container.innerHTML = '';
+                Object.keys(dati)
+                    .filter(key => key.startsWith('soglia_'))
+                    .forEach(key => {
+                        const mercatoNome = key.replace('soglia_', '').toUpperCase();
+                        const valore = dati[key];
+                        const bloccato = valore >= 100;
+
+                        const card = document.createElement('div');
+                        card.className = "engine-card rounded-xl p-4 flex justify-between items-center transition hover:border-[#00e5ff]/20";
+                        
+                        card.innerHTML = \`
+                            <div>
+                                <span class="text-xs font-black uppercase text-white">\${mercatoNome}</span>
+                                <span class="text-[9px] text-zinc-500 font-bold block mt-0.5 uppercase tracking-wider">📊 SOGLIA LIVE DI OGGI</span>
+                            </div>
+                            <div class="text-right">
+                                <span class="text-sm font-black tracking-wide \${bloccato ? 'text-red-500' : 'neon-accent'}">
+                                    \${bloccato ? 'BLOCKED' : valore.toFixed(1) + '%'}
+                                </span>
+                            </div>
+                        \`;
+                        container.appendChild(card);
+                    });
+
+            } catch (err) {
+                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE: \${err.message}</div>\`;
+            }
+        }
+
+        // Lancia la simulazione e popola i dati
+        async function eseguiBacktestEngine() {
+            if (!campionatoSelezionato) {
+                alert("Seleziona prima una competizione tramite il pulsante [SELECT]!");
                 return;
             }
 
-            const loader = document.getElementById('loader');
-            const sezioneRisultati = document.getElementById('sezione-risultati');
-            const btn = document.getElementById('btn-backtest');
+            const btnStart = document.getElementById('btn-start');
+            const container = document.getElementById('contenuto-principale');
+            const stato = document.getElementById('stato-allineamento');
 
-            loader.classList.remove('hidden');
-            sezioneRisultati.classList.add('hidden');
-            btn.disabled = true;
+            // Stato di caricamento
+            btnStart.classList.add('animate-pulse', 'text-[#00e5ff]', 'border-[#00e5ff]');
+            stato.textContent = campionatoSelezionato + " | SIMULAZIONE IN CORSO...";
+            
+            container.innerHTML = \`
+                <div class="py-20 text-center text-zinc-500">
+                    <svg class="animate-spin h-8 w-8 mx-auto text-[#00e5ff] mb-4" viewBox="0 0 24 24" fill="none">
+                        <circle class="opacity-10" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p class="text-[10px] font-black uppercase tracking-widest text-zinc-400">Ricerca parametri su 72 scenari...</p>
+                    <p class="text-[9px] text-zinc-600 mt-1">Confronto dati in memoria senza bias</p>
+                </div>
+            \`;
 
             try {
-                const res = await fetch(\`/backtest?campionato=\${encodeURIComponent(campionato)}\`);
+                const res = await fetch(\`/backtest?campionato=\${encodeURIComponent(campionatoSelezionato)}\`);
                 const report = await res.json();
 
                 if (report.error) {
                     alert(report.error);
-                    loader.classList.add('hidden');
-                    btn.disabled = false;
+                    await caricaSoglieLiveEngine();
                     return;
                 }
 
-                // Popolamento Statistiche generali
-                document.getElementById('stat-partite').textContent = report.partite_analizzate;
-                document.getElementById('stat-consigliate').textContent = report.riepilogo_generale.totale_consigliate;
-                document.getElementById('stat-precisione').textContent = report.riepilogo_generale.precisione_media + "%";
+                // Fine caricamento
+                stato.innerHTML = \`BACKTEST COMPLETATO | PRECISIONE: <span class="neon-accent font-black">\${report.riepilogo_generale.precisione_media}%</span>\`;
 
-                // Popolamento tabella mercati
-                const tbody = document.getElementById('tabella-corpo');
-                tbody.innerHTML = '';
-
+                container.innerHTML = '';
+                
+                // Generazione della lista dei 22 esiti identica allo screenshot
                 Object.keys(report.esiti).forEach(mercato => {
                     const dati = report.esiti[mercato];
-                    const tr = document.createElement('tr');
-                    tr.className = "hover:bg-gray-800/40 transition";
-                    
-                    let coloreBarra = "bg-red-500";
-                    if (dati.precisione_percentuale >= 70) coloreBarra = "bg-teal-400";
-                    else if (dati.precisione_percentuale >= 55) coloreBarra = "bg-amber-400";
+                    const card = document.createElement('div');
+                    card.className = "engine-card rounded-xl p-4 flex justify-between items-center hover:border-zinc-800 transition";
 
-                    tr.innerHTML = \`
-                        <td class="p-4 font-semibold text-gray-200 uppercase text-xs">\${mercato}</td>
-                        <td class="p-4 text-gray-300">\${dati.consigliate}</td>
-                        <td class="p-4 text-gray-300">\${dati.vinte}</td>
-                        <td class="p-4">
-                            <div class="flex items-center justify-end gap-3">
-                                <span class="font-bold text-white">\${dati.precisione_percentuale}%</span>
-                                <div class="w-24 bg-gray-700 h-2 rounded-full overflow-hidden hidden sm:block">
-                                    <div class="h-full \${coloreBarra}" style="width: \${dati.precisione_percentuale}%"></div>
-                                </div>
-                            </div>
-                        </td>
+                    // Impostiamo il colore di precisione in neon
+                    let colorePercentuale = "text-[#00e5ff]";
+                    if (dati.precisione_percentuale < 55) colorePercentuale = "text-red-500";
+                    else if (dati.precisione_percentuale < 70) colorePercentuale = "text-amber-500";
+
+                    card.innerHTML = \`
+                        <div>
+                            <span class="text-xs font-black uppercase text-white tracking-wide">\${mercato.toUpperCase()}</span>
+                            <span class="text-[9px] text-zinc-500 font-bold block mt-0.5 uppercase tracking-wider">
+                                📅 \${report.giornate_simulate} GOR_SIM | SUGGERITI: \${dati.consigliate} - VINTE: \${dati.vinte}
+                            </span>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-sm font-black tracking-wider \${colorePercentuale}">
+                                \${dati.precisione_percentuale.toFixed(1)}%
+                            </span>
+                        </div>
                     \`;
-                    tbody.appendChild(tr);
+                    container.appendChild(card);
                 });
 
-                sezioneRisultati.classList.remove('hidden');
-
             } catch (err) {
-                alert("Errore durante il calcolo del backtest: " + err.message);
+                container.innerHTML = \`<div class="text-center py-10 text-red-500 text-xs font-bold">ERRORE BACKTEST: \${err.message}</div>\`;
             } finally {
-                loader.classList.add('hidden');
-                btn.disabled = false;
+                btnStart.classList.remove('animate-pulse', 'text-[#00e5ff]', 'border-[#00e5ff]');
             }
         }
 
-        // Forza manualmente l'allineamento e il calcolo notturno delle soglie
-        async function forzaCalibrazioneLive() {
-            if (!confirm("Desideri ricalcolare ora le soglie operative di oggi per tutti i campionati? L'operazione avverrà in background.")) return;
+        // Lancia calibrazione manuale
+        async function lanciaCalibrazioneLive() {
+            if (!campionatoSelezionato) {
+                alert("Seleziona prima un campionato!");
+                return;
+            }
+            if (!confirm("Avviare la calibrazione live e calcolare le soglie di oggi per " + campionatoSelezionato + "?")) return;
+
             try {
                 const res = await fetch('/run-live');
                 const dati = await res.json();
-                alert(dati.status);
+                alert("Processo avviato! Tra circa 10 secondi aggiorna la pagina per visualizzare le nuove soglie.");
             } catch (err) {
                 alert("Errore nell'avvio della calibrazione: " + err.message);
             }
+        }
+
+        // Lancia calibrazione massiva
+        async function lanciaNitroBulk() {
+            if (!confirm("AVVERTENZA: Desideri forzare la ricalibrazione 'NITRO' in background per tutti i 34 campionati? Questa operazione rinfrescherà tutte le soglie.")) return;
+            try {
+                const res = await fetch('/run-live');
+                const dati = await res.json();
+                alert("Allineamento Nitro avviato! Le soglie verranno aggiornate in background nel database.");
+            } catch (err) {
+                alert("Errore nell'avvio Nitro: " + err.message);
+            }
+        }
+
+        function resetSchermata() {
+            campionatoSelezionato = "";
+            document.getElementById('stato-allineamento').textContent = "SELEZIONA COMPETIZIONE PER INIZIARE";
+            document.getElementById('stato-allineamento').className = "text-[10px] text-gray-500 font-bold uppercase tracking-widest mb-1";
+            document.getElementById('data-ultimo-calcolo').textContent = "ULTIMA ELABORAZIONE: -";
+            
+            const container = document.getElementById('contenuto-principale');
+            container.innerHTML = \`
+                <div class="py-20 text-center text-gray-600">
+                    <svg class="h-10 w-10 mx-auto text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                    </svg>
+                    <p class="text-xs font-bold uppercase tracking-wider">Nessun Campionato Selezionato</p>
+                    <p class="text-[10px] text-gray-500 mt-1">Usa la barra inferiore [SELECT] per scegliere una lega.</p>
+                </div>
+            \`;
         }
     </script>
 </body>
