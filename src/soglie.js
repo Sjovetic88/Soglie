@@ -62,14 +62,41 @@ export default {
 
           const mappaSoglie = new Map(soglieResults.map(s => [s.campionato, s.date_aggiornamento]));
 
+          // Recuperiamo anche i dettagli dell'ultimo match effettivo di ogni campionato per caricarlo sulla UI in modo statico
+          const dettagliMatchCompleti = [];
+          for (const r of d1Results) {
+            const queryUltimoMatch = `
+              SELECT date, home_team, away_team, fthg, ftag 
+              FROM validazione_risultati 
+              WHERE campionato = ? AND date = ? 
+              LIMIT 1;
+            `;
+            const m = await env.DB_PRONOSTICI.prepare(queryUltimoMatch).bind(r.campionato, r.ultima_data).first();
+            dettagliMatchCompleti.push({
+              campionato: r.campionato,
+              date: m ? m.date : r.ultima_data,
+              home: m ? m.home_team : "-",
+              away: m ? m.away_team : "-",
+              fthg: m ? m.fthg : 0,
+              ftag: m ? m.ftag : 0
+            });
+          }
+
+          const mappaDettagliMatch = new Map(dettagliMatchCompleti.map(d => [d.campionato, d]));
+
           const listaCampionati = d1Results.map(r => {
             const dataSoglia = mappaSoglie.get(r.campionato);
+            const mDettaglio = mappaDettagliMatch.get(r.campionato);
             return {
               campionato: r.campionato,
-              ultima_partita: r.ultima_data,
               totale_match: r.totale_match,
               aggiornato: dataSoglia ? 1 : 0,
-              data_aggiornamento: dataSoglia || "-"
+              data_aggiornamento: dataSoglia || "-",
+              ultimo_match_data: mDettaglio ? mDettaglio.date : "-",
+              ultimo_match_home: mDettaglio ? mDettaglio.home : "-",
+              ultimo_match_away: mDettaglio ? mDettaglio.away : "-",
+              ultimo_match_fthg: mDettaglio ? mDettaglio.fthg : 0,
+              ultimo_match_ftag: mDettaglio ? mDettaglio.ftag : 0
             };
           });
 
@@ -90,7 +117,7 @@ export default {
         }
       }
 
-      // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match
+      // 5. API STREAMING (SSE): Calcolo ed elaborazione in diretta dei match con tracciamento dati estesi
       if (path === "/backtest") {
         const campionato = url.searchParams.get("campionato");
         if (!campionato) {
@@ -260,9 +287,9 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
 
     matchesProcessati += matchDelGiorno.length;
 
-    // Invio progresso in real-time tramite SSE
+    // Invio progressi real-time con lo spacchettamento dettagliato del match
     if (matchDelGiorno.length > 0) {
-      const ultimoMatchStr = `${dataCorrente} | ${matchDelGiorno[0].home_team} - ${matchDelGiorno[0].away_team} ${matchDelGiorno[0].fthg}-${matchDelGiorno[0].ftag}`;
+      const matchAttivo = matchDelGiorno[0];
       const percentualeStr = ((matchesProcessati / totaleMatchesDaSimulare) * 100).toFixed(1);
       
       const chunkProgresso = JSON.stringify({
@@ -270,7 +297,11 @@ async function eseguiBacktestInStreaming(campionato, env, writer, encoder) {
         elaborati: matchesProcessati,
         totale: totaleMatchesDaSimulare,
         percentuale: percentualeStr,
-        ultimoMatch: ultimoMatchStr
+        date: matchAttivo.date,
+        home: matchAttivo.home_team,
+        away: matchAttivo.away_team,
+        fthg: matchAttivo.fthg,
+        ftag: matchAttivo.ftag
       });
 
       await writer.write(encoder.encode(`data: ${chunkProgresso}\n\n`));
@@ -488,65 +519,13 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 }
 
 // ==========================================
-// METODI INTERFACCIAMENTO D1 DATABASE
+// FUNZIONI DI COESISTENZA E AGGREGAZIONE
 // ==========================================
 
-async function caricaPartiteStoriche(campionato, dataRiferimento, giorniIndietro, env) {
-  const dataInizio = calcolaDataMenoGiorni(dataRiferimento, giorniIndietro);
-  const query = `
-    SELECT * FROM validazione_risultati 
-    WHERE campionato = ? 
-      AND date >= ? 
-      AND date < ?
-      AND fthg IS NOT NULL 
-      AND ftag IS NOT NULL
-    ORDER BY date ASC;
-  `;
-  const { results } = await env.DB_PRONOSTICI.prepare(query).bind(campionato, dataInizio, dataRiferimento).all();
+async function caricaCacheCalibrazioni(campionato, env) {
+  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
+  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
   return results;
-}
-
-async function salvaSogliaAttiva(campionato, dataOggi, soglie, env) {
-  const query = `
-    INSERT INTO soglie_attive (
-      campionato, date_aggiornamento,
-      soglia_1, soglia_X, soglia_2, soglia_gg, soglia_ng,
-      soglia_u05, soglia_o05, soglia_u15, soglia_o15, soglia_u25, soglia_o25,
-      soglia_u35, soglia_o35, soglia_u45, soglia_o45,
-      soglia_sg0, soglia_sg1, soglia_sg2, soglia_sg3, soglia_sg4, soglia_sg5, soglia_sg6p
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    ) ON CONFLICT(campionato) DO UPDATE SET
-      date_aggiornamento = excluded.date_aggiornamento,
-      soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
-      soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
-      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
-      soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
-      soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
-      soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
-      soglia_sg3=excluded.soglia_sg3, soglia_sg4=excluded.soglia_sg4, soglia_sg5=excluded.soglia_sg5, soglia_sg6p=excluded.soglia_sg6p;
-  `;
-
-  await env.DB_SOGLIE.prepare(query).bind(
-    campionato, dataOggi,
-    soglie["1"], soglie["X"], soglie["2"], soglie["gg"], soglie["ng"],
-    soglie["u05"], soglie["o05"], soglie["u15"], soglie["o15"], soglie["u25"], soglie["o25"],
-    soglie["u35"], soglie["o35"], soglie["u45"], soglie["o45"],
-    soglie["sg0"], soglie["sg1"], soglie["sg2"], soglie["sg3"], soglie["sg4"], soglie["sg5"], soglie["sg6p"]
-  ).run();
-}
-
-async function cacheCalibrazioneGiornaliera(campionato, dataCalibrazione, calibrazione, env) {
-  const payload = {
-    campionato,
-    date_calibrazione: dataCalibrazione,
-    finestra_giorni: calibrazione.finestra_giorni,
-    raggio_smussamento: calibrazione.raggio_smussamento,
-    penale_applicata: calibrazione.penale_applicata,
-    ...calibrazione.soglie
-  };
-  const stmt = preparaQuerySalvataggioCache(payload, env);
-  await stmt.run();
 }
 
 function preparaQuerySalvataggioCache(d, env) {
@@ -565,7 +544,7 @@ function preparaQuerySalvataggioCache(d, env) {
       penale_applicata=excluded.penale_applicata,
       soglia_1=excluded.soglia_1, soglia_X=excluded.soglia_X, soglia_2=excluded.soglia_2,
       soglia_gg=excluded.soglia_gg, soglia_ng=excluded.soglia_ng,
-      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, stroke_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
+      soglia_u05=excluded.soglia_u05, soglia_o05=excluded.soglia_o05, soglia_u15=excluded.soglia_u15, soglia_o15=excluded.soglia_o15,
       soglia_u25=excluded.soglia_u25, soglia_o25=excluded.soglia_o25, soglia_u35=excluded.soglia_u35, soglia_o35=excluded.soglia_o35,
       soglia_u45=excluded.soglia_u45, soglia_o45=excluded.soglia_o45,
       soglia_sg0=excluded.soglia_sg0, soglia_sg1=excluded.soglia_sg1, soglia_sg2=excluded.soglia_sg2,
@@ -580,61 +559,6 @@ function preparaQuerySalvataggioCache(d, env) {
   );
 }
 
-async function caricaCacheCalibrazioni(campionato, env) {
-  const query = `SELECT * FROM calibrazioni_giornaliere WHERE campionato = ?;`;
-  const { results } = await env.DB_SOGLIE.prepare(query).bind(campionato).all();
-  return results;
-}
-
-function valutaMatchRispettoAlleSoglie(match, soglie, report) {
-  const esitiInCorso = calcolaMappaEsitiReali(match.fthg, match.ftag);
-
-  for (const mercato of LISTA_MERCATI) {
-    const prob = match[`prob_${mercato}`];
-    const sogliaValore = soglie[`soglia_${mercato}`];
-
-    if (prob !== undefined && prob !== null && sogliaValore !== undefined && sogliaValore !== null) {
-      const limiteDecimale = sogliaValore / 100.0;
-      if (prob >= limiteDecimale) {
-        report[mercato].scommesseConsigliate++;
-        if (esitiInCorso[mercato] === 1) {
-          report[mercato].scommesseVinte++;
-        }
-      }
-    }
-  }
-}
-
-function ottieniDataOggiYMD() {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function calcolaDataMenoGiorni(dataRiferimentoYMD, giorni) {
-  const d = new Date(dataRiferimentoYMD);
-  d.setDate(d.getDate() - giorni);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
-  if (dateUniche.length === 0) return -1;
-  const primaDataAssoluta = dateUniche[0];
-
-  for (let i = 0; i < dateUniche.length; i++) {
-    const differenzaGiorni = (new Date(dateUniche[i]) - new Date(primaDataAssoluta)) / (1000 * 60 * 60 * 24);
-    if (differenzaGiorni >= giorniMinimi) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 function inizializzaStrutturaReport() {
   const report = {};
   for (const m of LISTA_MERCATI) {
@@ -643,8 +567,46 @@ function inizializzaStrutturaReport() {
   return report;
 }
 
+function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCalcolate, reportMercati) {
+  const mercatiDettaglio = {};
+  let totaleConsigliateGlobali = 0;
+  let totaleVinteGlobali = 0;
+
+  for (const m of LISTA_MERCATI) {
+    const dati = reportMercati[m];
+    const precisione = dati.scommesseConsigliate > 0 
+      ? Number(((dati.scommesseVinte / dati.scommesseConsigliate) * 100).toFixed(2)) 
+      : 0;
+
+    mercatiDettaglio[m] = {
+      consigliate: dati.scommesseConsigliate,
+      vinte: dati.scommesseVinte,
+      precisione_percentuale: precisione
+    };
+
+    totaleConsigliateGlobali += dati.scommesseConsigliate;
+    totaleVinteGlobali += dati.scommesseVinte;
+  }
+
+  const precisioneGlobale = totaleConsigliateGlobali > 0 
+    ? Number(((totaleVinteGlobali / totaleConsigliateGlobali) * 100).toFixed(2)) 
+    : 0;
+
+  return {
+    campionato,
+    partite_analizzate: totalePartite,
+    giornate_simulate: totaleGiornateCalcolate,
+    riepilogo_generale: {
+      totale_consigliate: totaleConsigliateGlobali,
+      totale_vinte: totaleVinteGlobali,
+      precisione_media: precisioneGlobale
+    },
+    esiti: mercatiDettaglio
+  };
+}
+
 // ==========================================
-// RENDERING COMPLETO PANNELLO HTML (GOLDBET)
+// INTERFACCIA WEB COMPLETA HTML (AMOLED)
 // ==========================================
 
 function ottieniHTMLDashboardEngineCompleto() {
@@ -789,6 +751,7 @@ function ottieniHTMLDashboardEngineCompleto() {
         let datiSoglieOperative = [];
         let backtestResults = {}; 
         let currentSseConnection = null;
+        let isProcessingInCorso = false;
 
         window.addEventListener('DOMContentLoaded', () => {
             eseguiDiagnosticaIniziale();
@@ -847,13 +810,22 @@ function ottieniHTMLDashboardEngineCompleto() {
                     
                     // Al click selezioniamo/deselezioniamo il campionato
                     card.onclick = (e) => {
-                        // Impedisce la selezione se si sta cliccando dentro l'area dei risultati già pronti
+                        // Impedisce di togglare la selezione se l'utente clicca sui risultati o se c'è un calcolo attivo
+                        if (isProcessingInCorso) return;
                         if (e.target.closest('.dettagli-backtest-box')) return;
+                        if (e.target.closest('.progresso-inline-box')) return;
                         togglaSelezioneCampionato(item.campionato);
                     };
 
                     const badgeColore = item.aggiornato ? "text-emerald-400 bg-emerald-950/40" : "text-zinc-600 bg-zinc-950/40";
                     const badgeTesto = item.aggiornato ? "CALIBRATO" : "IN ATTESA";
+
+                    // Formattiamo staticamente il record dell'ultimo match nel formato MM-DD-YYYY
+                    const dataInizialeFmt = formattaDataMMDDYYYY(item.ultimo_match_data);
+                    const homeTeamFmt = item.ultimo_match_home.toUpperCase();
+                    const awayTeamFmt = item.ultimo_match_away.toUpperCase();
+                    const scoreFmt = item.ultimo_match_fthg + '-' + item.ultimo_match_ftag;
+                    const rigaDettaglioMatch = '📆 ' + dataInizialeFmt + ' | ' + homeTeamFmt + ' - ' + awayTeamFmt + ' ' + scoreFmt;
 
                     card.innerHTML = 
                         '<div class="flex justify-between items-center shrink-0">' +
@@ -862,8 +834,8 @@ function ottieniHTMLDashboardEngineCompleto() {
                                     '<span id="select-indicator-' + cleanId + '" class="hidden text-[#00e5ff] text-xs">●</span>' +
                                     item.campionato +
                                 '</h3>' +
-                                '<p class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider mt-0.5" id="desc-' + cleanId + '">' +
-                                    'Ultimo Match: ' + (item.ultima_partita || "-") + ' | Match: ' + item.totale_match +
+                                '<p class="text-[9px] text-zinc-500 font-bold uppercase tracking-wider mt-0.5" id="desc-' + cleanId + '" data-original="' + rigaDettaglioMatch + '">' +
+                                    rigaDettaglioMatch +
                                 '</p>' +
                             '</div>' +
                             '<div>' +
@@ -874,7 +846,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                         '</div>' +
 
                         '<!-- MICRO PANNELLO PROGRESSO IN LINEA (NASCOSTO DI BASE) -->' +
-                        '<div id="progresso-box-' + cleanId + '" class="hidden border-t border-zinc-900 pt-3 mt-2 space-y-1.5">' +
+                        '<div id="progresso-box-' + cleanId + '" onclick="event.stopPropagation()" class="progresso-inline-box hidden border-t border-zinc-900 pt-3 mt-2 space-y-1.5">' +
                             '<div class="flex justify-between items-center text-[8px] uppercase tracking-wider font-bold">' +
                                 '<span class="text-zinc-500">Avanzamento Simulazione</span>' +
                                 '<span id="progresso-txt-' + cleanId + '" class="neon-cyan">0.0%</span>' +
@@ -882,13 +854,10 @@ function ottieniHTMLDashboardEngineCompleto() {
                             '<div class="w-full bg-zinc-950 h-1.5 rounded-full overflow-hidden border border-zinc-900">' +
                                 '<div id="progresso-bar-' + cleanId + '" class="h-full progress-bar-fill" style="width: 0%"></div>' +
                             '</div>' +
-                            '<p id="progresso-match-' + cleanId + '" class="text-[8px] text-zinc-500 truncate uppercase mt-1">' +
-                                'Preparazione dati in corso...' +
-                            '</p>' +
                         '</div>' +
 
                         '<!-- FISARMONICA RISULTATI POST-CALCOLO (ACCORDION INTERNO ALLA CARD) -->' +
-                        '<div id="dettagli-box-' + cleanId + '" class="hidden dettagli-backtest-box border-t border-zinc-900 pt-3 mt-3 space-y-3">' +
+                        '<div id="dettagli-box-' + cleanId + '" onclick="event.stopPropagation()" class="dettagli-backtest-box hidden border-t border-zinc-900 pt-3 mt-3 space-y-3">' +
                             '<div class="grid grid-cols-2 gap-2 text-center">' +
                                 '<div class="bg-black p-2 rounded border border-zinc-900">' +
                                     '<span class="text-[8px] text-zinc-500 block uppercase font-bold">Segnalate</span>' +
@@ -961,13 +930,15 @@ function ottieniHTMLDashboardEngineCompleto() {
 
             const campionatiDaElaborare = [...campionatiSelezionati];
             
-            // Ripristiniamo la selezione prima di partire per bloccare la UI
+            // UI LOCK: impediamo click estranei durante il processo
+            isProcessingInCorso = true;
             disabilitaInterfacciaCompletamente(true);
 
             for (const camp of campionatiDaElaborare) {
                 await elaboraCampionatoInStreaming(camp);
             }
 
+            isProcessingInCorso = false;
             disabilitaInterfacciaCompletamente(false);
             campionatiSelezionati = [];
             aggiornaBottoneAvvioSoglie();
@@ -978,9 +949,9 @@ function ottieniHTMLDashboardEngineCompleto() {
             return new Promise((resolve) => {
                 const idCamp = pulisciId(campionato);
                 
-                // Mostra il blocco di progresso all'interno della card
+                // Espande ed attiva la barra di progresso
                 document.getElementById('progresso-box-' + idCamp).classList.remove('hidden');
-                document.getElementById('dettagli-box-' + idCamp).classList.add('hidden'); // Chiude eventuali risultati vecchi
+                document.getElementById('dettagli-box-' + idCamp).classList.add('hidden'); // Chiude accordion vecchi
 
                 // Avvia connessione SSE
                 if (currentSseConnection) currentSseConnection.close();
@@ -990,20 +961,32 @@ function ottieniHTMLDashboardEngineCompleto() {
                     const data = JSON.parse(event.data);
 
                     if (data.type === "progress") {
+                        // 1. Aggiorna percentuale numerica e barra
                         document.getElementById('progresso-txt-' + idCamp).textContent = data.percentuale + "%";
                         document.getElementById('progresso-bar-' + idCamp).style.width = data.percentuale + "%";
-                        document.getElementById('progresso-match-' + idCamp).textContent = data.ultimoMatch.toUpperCase();
+                        
+                        // 2. TIMELINE TICKER: Formatta la riga descrittiva sotto il campionato in tempo reale
+                        const dataFmt = formattaDataMMDDYYYY(data.date);
+                        const homeFmt = data.home.toUpperCase();
+                        const awayFmt = data.away.toUpperCase();
+                        const scoreFmt = data.fthg + '-' + data.ftag;
+                        
+                        document.getElementById('desc-' + idCamp).textContent = '📆 ' + dataFmt + ' | ' + homeFmt + ' - ' + awayFmt + ' ' + scoreFmt;
                     } 
                     
                     else if (data.type === "complete") {
                         currentSseConnection.close();
                         
-                        // Nascondi barra progresso, aggiorna badge e popola accordion interno
+                        // Nascondi barra progresso, aggiorna badge in 100.0% e popola accordion interno
                         document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
                         
                         const badge = document.getElementById('badge-' + idCamp);
                         badge.className = "text-[8px] font-black px-2 py-0.5 rounded text-emerald-400 bg-emerald-950/40 tracking-widest uppercase";
-                        badge.textContent = "CALIBRATO";
+                        badge.textContent = "100.0%"; // Mostra il 100% come nello screenshot
+
+                        // Ripristina la riga descrittiva all'ultimo match statico registrato
+                        const desc = document.getElementById('desc-' + idCamp);
+                        desc.textContent = desc.dataset.original;
 
                         visualizzaDettagliRisultatiCard(campionato, data.report);
                         resolve();
@@ -1013,6 +996,10 @@ function ottieniHTMLDashboardEngineCompleto() {
                         currentSseConnection.close();
                         alert("Errore calcolo " + campionato + ": " + data.message);
                         document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
+                        
+                        // Ripristina riga descrittiva
+                        const desc = document.getElementById('desc-' + idCamp);
+                        desc.textContent = desc.dataset.original;
                         resolve();
                     }
                 };
@@ -1020,6 +1007,9 @@ function ottieniHTMLDashboardEngineCompleto() {
                 currentSseConnection.onerror = function() {
                     currentSseConnection.close();
                     document.getElementById('progresso-box-' + idCamp).classList.add('hidden');
+                    
+                    const desc = document.getElementById('desc-' + idCamp);
+                    desc.textContent = desc.dataset.original;
                     resolve();
                 };
             });
@@ -1028,7 +1018,6 @@ function ottieniHTMLDashboardEngineCompleto() {
         function visualizzaDettagliRisultatiCard(campionato, report) {
             const idCamp = pulisciId(campionato);
             
-            // Salviamo i risultati in memoria per consultarli in seguito
             backtestResults[campionato] = report;
 
             document.getElementById('det-consigliate-' + idCamp).textContent = report.riepilogo_generale.totale_consigliate;
@@ -1037,7 +1026,6 @@ function ottieniHTMLDashboardEngineCompleto() {
             const griglia = document.getElementById('det-griglia-' + idCamp);
             griglia.innerHTML = '';
 
-            // Generiamo un badge mini per ognuno dei 22 mercati simulati
             Object.keys(report.esiti).forEach(m => {
                 const dati = report.esiti[m];
                 const item = document.createElement('div');
@@ -1054,7 +1042,7 @@ function ottieniHTMLDashboardEngineCompleto() {
                 griglia.appendChild(item);
             });
 
-            // Apriamo visivamente la fisarmonica dei risultati
+            // Espande la fisarmonica interna alla card con i risultati finali
             document.getElementById('dettagli-box-' + idCamp).classList.remove('hidden');
         }
 
@@ -1201,6 +1189,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             if (currentSseConnection) currentSseConnection.close();
             campionatiSelezionati = [];
             backtestResults = {};
+            isProcessingInCorso = false;
             aggiornaBottoneAvvioSoglie();
             
             // Ripristino grafico di tutte le card
@@ -1220,6 +1209,13 @@ function ottieniHTMLDashboardEngineCompleto() {
             });
 
             navigaTab('home');
+        }
+
+        function formattaDataMMDDYYYY(dataStr) {
+            if (!dataStr || dataStr === "-") return "-";
+            const parti = dataStr.split('-');
+            if (parti.length !== 3) return dataStr;
+            return parti[1] + '-' + parti[2] + '-' + parti[0]; // Restituisce MM-DD-YYYY
         }
 
         function pulisciId(str) {
