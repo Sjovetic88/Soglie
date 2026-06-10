@@ -519,7 +519,7 @@ function calcolaMappaEsitiReali(fthg, ftag) {
 }
 
 // ==========================================
-// FUNZIONI DI COESISTENZA E AGGREGAZIONE
+// FUNZIONI DI ASSISTENZA MATEMATICA E TEMPO
 // ==========================================
 
 async function caricaCacheCalibrazioni(campionato, env) {
@@ -557,6 +557,36 @@ function preparaQuerySalvataggioCache(d, env) {
     d.soglia_u35, d.soglia_o35, d.soglia_u45, d.soglia_o45,
     d.soglia_sg0, d.soglia_sg1, d.soglia_sg2, d.soglia_sg3, d.soglia_sg4, d.soglia_sg5, d.soglia_sg6p
   );
+}
+
+function trovaIndicePrimaDataUtile(dateUniche, tuttiMatch, giorniMinimi) {
+  if (dateUniche.length === 0) return -1;
+  const primaDataAssoluta = dateUniche[0];
+
+  for (let i = 0; i < dateUniche.length; i++) {
+    const differenzaGiorni = (new Date(dateUniche[i]) - new Date(primaDataAssoluta)) / (1000 * 60 * 60 * 24);
+    if (differenzaGiorni >= giorniMinimi) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function calcolaDataMenoGiorni(dataRiferimentoYMD, giorni) {
+  const d = new Date(dataRiferimentoYMD);
+  d.setDate(d.getDate() - giorni);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
+}
+
+function ottieniDataOggiYMD() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
 }
 
 function inizializzaStrutturaReport() {
@@ -606,7 +636,7 @@ function generaRiepilogoFinalizzato(campionato, totalePartite, totaleGiornateCal
 }
 
 // ==========================================
-// INTERFACCIA WEB COMPLETA HTML (AMOLED)
+// RENDERING INTERFACCIA HTML (GOLDBET)
 // ==========================================
 
 function ottieniHTMLDashboardEngineCompleto() {
@@ -653,20 +683,14 @@ function ottieniHTMLDashboardEngineCompleto() {
 </head>
 <body class="overflow-x-hidden min-h-screen pb-24">
 
-    <!-- BARRA DIAGNOSTICA SUPERIORE -->
-    <div id="diagnostic-bar" class="bg-amber-950/40 border-b border-amber-900/50 py-2 px-4 text-center">
-        <span id="diagnostic-text" class="text-[9px] text-amber-500 font-bold uppercase tracking-widest animate-pulse">
-            Sincronizzazione in corso con Cloudflare D1...
-        </span>
-    </div>
-
-    <!-- INTESTAZIONE LOGO ENGINE -->
-    <header class="text-center py-5">
-        <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5">
+    <!-- INTESTAZIONE LOGO ENGINE CON LED DI STATO -->
+    <header class="text-center py-6 mt-2">
+        <h1 class="text-2xl font-black uppercase tracking-wider mb-0.5 inline-flex items-center gap-2.5">
             GOLDBET <span class="neon-cyan">SOGLIE</span>
+            <span id="header-status-dot" class="h-3.5 w-3.5 rounded-full bg-amber-500 animate-pulse shadow-[0_0_10px_#f59e0b]"></span>
         </h1>
-        <div id="stat-allineamento-globale" class="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">
-            MOTORE DI CALCOLO ATTIVO
+        <div id="stat-allineamento-globale" class="text-[9px] text-zinc-500 font-bold uppercase tracking-widest mt-1">
+            CONVERSIONE E STRUTTURAZIONE IN MEMORIA
         </div>
     </header>
 
@@ -759,10 +783,10 @@ function ottieniHTMLDashboardEngineCompleto() {
             caricaSoglieLiveFisarmonica();
         });
 
-        // 1. FUNZIONE DIAGNOSTICA PROATTIVA
+        // 1. FUNZIONE DIAGNOSTICA PROATTIVA CON ACCENSIONE LED
         async function eseguiDiagnosticaIniziale() {
-            const bar = document.getElementById('diagnostic-bar');
-            const text = document.getElementById('diagnostic-text');
+            const led = document.getElementById('header-status-dot');
+            const sub = document.getElementById('stat-allineamento-globale');
             try {
                 const res = await fetch('/api/diagnostica');
                 if (!res.ok) {
@@ -771,9 +795,10 @@ function ottieniHTMLDashboardEngineCompleto() {
                 }
                 const diagnostica = await res.json();
                 if (diagnostica.status === "OK") {
-                    bar.className = "bg-emerald-950/40 border-b border-emerald-900/50 py-2 px-4 text-center transition duration-500";
-                    text.className = "text-[9px] text-emerald-400 font-bold uppercase tracking-widest";
-                    text.textContent = "✔ DATABASE SINCRONIZZATI | CONNESSIONE D1 STABILE";
+                    // Accende il LED in VERDE NEON
+                    led.className = "h-3.5 w-3.5 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_12px_#10b981]";
+                    sub.className = "text-[9px] text-emerald-500 font-bold uppercase tracking-widest mt-1";
+                    sub.textContent = "✔ MOTORE DI CALCOLO ONLINE | D1 STABILE";
                 } else {
                     throw new Error(diagnostica.messaggio || "Errore sconosciuto");
                 }
@@ -783,11 +808,13 @@ function ottieniHTMLDashboardEngineCompleto() {
         }
 
         function mostraErroreDiagnostica(msg) {
-            const bar = document.getElementById('diagnostic-bar');
-            const text = document.getElementById('diagnostic-text');
-            bar.className = "bg-red-950/40 border-b border-red-900/50 py-2 px-4 text-center";
-            text.className = "text-[9px] text-red-500 font-bold uppercase tracking-widest";
-            text.textContent = "✖ ERRORE DI CONFIGURAZIONE D1: " + msg.toUpperCase();
+            const led = document.getElementById('header-status-dot');
+            const sub = document.getElementById('stat-allineamento-globale');
+            
+            // Accende il LED in ROSSO NEON e mostra l'errore SQL sotto il titolo
+            led.className = "h-3.5 w-3.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_12px_#ef4444]";
+            sub.className = "text-[9px] text-red-500 font-bold uppercase tracking-widest mt-1 px-4";
+            sub.textContent = "✖ ERRORE CONNESSIONE D1: " + msg.toUpperCase();
         }
 
         // 2. RENDERING LISTA CAMPIONATI (HOME TAB)
@@ -1141,6 +1168,7 @@ function ottieniHTMLDashboardEngineCompleto() {
             }
         }
 
+        // Filtro rapido delle soglie live nella tab di monitoraggio
         function filtraSoglie() {
             const query = document.getElementById('cerca-soglie-input').value.toLowerCase();
             const items = document.querySelectorAll('.dynamic-soglia-item');
@@ -1213,9 +1241,9 @@ function ottieniHTMLDashboardEngineCompleto() {
 
         function formattaDataMMDDYYYY(dataStr) {
             if (!dataStr || dataStr === "-") return "-";
-            const parti = dataStr.split('-');
+            var parti = dataStr.split("-");
             if (parti.length !== 3) return dataStr;
-            return parti[1] + '-' + parti[2] + '-' + parti[0]; // Restituisce MM-DD-YYYY
+            return parti[1] + "-" + parti[2] + "-" + parti[0]; // Restituisce MM-DD-YYYY
         }
 
         function pulisciId(str) {
