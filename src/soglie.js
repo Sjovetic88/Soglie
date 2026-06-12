@@ -219,6 +219,24 @@ function calcolaBrierSingoloEsito(partite, esito) {
   return sommaErrori / conteggioValidi;
 }
 
+// Restituisce le soglie specifiche per semaforo in base al tipo di mercato
+function ottieniSoglieSpecifiche(esito) {
+  // Gruppo 1: Ultra-Sbilanciati (U05, O05, SG0, SG5, SG6p)
+  if (esito === "U05" || esito === "O05" || esito === "SG0" || esito === "SG5" || esito === "SG6p") {
+    return { verde: 0.20, rosso: 0.30 };
+  }
+  // Gruppo 2: Altamente Sbilanciati (U15, O15, U45, O45, SG1, SG4)
+  if (esito === "U15" || esito === "O15" || esito === "U45" || esito === "O45" || esito === "SG1" || esito === "SG4") {
+    return { verde: 0.35, rosso: 0.45 };
+  }
+  // Gruppo 3: Binari Bilanciati (GG, NG, U25, O25, U35, O35, SG2, SG3)
+  if (esito === "GG" || esito === "NG" || esito === "U25" || esito === "O25" || esito === "U35" || esito === "O35" || esito === "SG2" || esito === "SG3") {
+    return { verde: 0.46, rosso: 0.50 };
+  }
+  // Gruppo 4: Multiclasse 1X2 (1, X, 2)
+  return { verde: 0.48, rosso: 0.55 };
+}
+
 async function elaboraSoglieCampionato(env, nazione, campionato) {
   const queryPartite = await env.DB_SOGLIE.prepare(
     "SELECT * FROM partite_filtrate WHERE nazione = ? AND campionato = ?"
@@ -236,17 +254,18 @@ async function elaboraSoglieCampionato(env, nazione, campionato) {
 
   for (const esito of listaEsiti) {
     const brier = calcolaBrierSingoloEsito(partite, esito);
+    const limiti = ottieniSoglieSpecifiche(esito);
     let semaforo = "VERDE";
 
-    if (brier >= 0.72) {
+    if (brier >= limiti.rosso) {
       semaforo = "ROSSO";
-    } else if (brier >= 0.68) {
+    } else if (brier >= limiti.verde) {
       semaforo = "GIALLO";
     }
 
     let sogliaAttiva = 0.0; 
     if (semaforo === "ROSSO") {
-      sogliaAttiva = 100.0; 
+      sogliaAttiva = 100.0; // Freno d'emergenza attivo
     }
 
     chiamateBatch.push(
@@ -817,7 +836,7 @@ async function handleRequest(request, env) {
     "    var res = await fetch('/api/elabora-soglia-singola', {",
     "      method: 'POST',",
     "      headers: { 'Content-Type': 'application/json' },",
-    "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
+    "      body: JSON.stringify({ nazione:礼物 nazione, campionato: prossimo.campionato })",
     "    });",
     "    if (res.ok) {",
     "      var ris = await res.json();",
