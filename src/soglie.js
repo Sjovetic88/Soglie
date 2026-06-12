@@ -836,7 +836,7 @@ async function handleRequest(request, env) {
     "    var res = await fetch('/api/elabora-soglia-singola', {",
     "      method: 'POST',",
     "      headers: { 'Content-Type': 'application/json' },",
-    "      body: JSON.stringify({ nazione:礼物 nazione, campionato: prossimo.campionato })",
+    "      body: JSON.stringify({ nazione: prossimo. nazione, campionato: prossimo.campionato })",
     "    });",
     "    if (res.ok) {",
     "      var ris = await res.json();",
