@@ -4,6 +4,10 @@ const listaEsiti = [
   "SG0", "SG1", "SG2", "SG3", "SG4", "SG5", "SG6p"
 ];
 
+const finestreTemporali = [365, 500, 730, 1000];
+const raggiSmussamento = [1, 2, 3];
+const penaliGiallo = [4, 6, 8, 10, 12, 14];
+
 function calcolaDateIntervallo() {
   const oggi = new Date();
   const milleGiorniFa = new Date();
@@ -20,6 +24,15 @@ function calcolaDateIntervallo() {
     oggi: formattaData(oggi),
     inizio: formattaData(milleGiorniFa)
   };
+}
+
+function calcolaDataLimite(giorni) {
+  const d = new Date();
+  d.setDate(d.getDate() - giorni);
+  const anno = d.getFullYear();
+  const mese = String(d.getMonth() + 1).padStart(2, "0");
+  const giorno = String(d.getDate()).padStart(2, "0");
+  return anno + "-" + mese + "-" + giorno;
 }
 
 async function ottieniMappaBandiereDinamica(env) {
@@ -128,88 +141,92 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
   return totaleCopiate;
 }
 
+// Estrae la probabilita stimata e l'esito reale di una partita per un determinato esito
+function estraiDatiPartitaPerEsito(p, esito) {
+  const g = p.fthg + p.ftag;
+  let prob = 0;
+  let reale = 0;
+
+  if (esito === "1") {
+    prob = p.prob_1;
+    reale = (p.fthg > p.ftag) ? 1 : 0;
+  } else if (esito === "X") {
+    prob = p.prob_X;
+    reale = (p.fthg === p.ftag) ? 1 : 0;
+  } else if (esito === "2") {
+    prob = p.prob_2;
+    reale = (p.fthg < p.ftag) ? 1 : 0;
+  } else if (esito === "GG") {
+    prob = p.prob_gg;
+    reale = (p.fthg > 0 && p.ftag > 0) ? 1 : 0;
+  } else if (esito === "NG") {
+    prob = p.prob_ng;
+    reale = (p.fthg === 0 || p.ftag === 0) ? 1 : 0;
+  } else if (esito === "U05") {
+    prob = p.prob_u05;
+    reale = (g < 0.5) ? 1 : 0;
+  } else if (esito === "O05") {
+    prob = p.prob_o05;
+    reale = (g > 0.5) ? 1 : 0;
+  } else if (esito === "U15") {
+    prob = p.prob_u15;
+    reale = (g < 1.5) ? 1 : 0;
+  } else if (esito === "O15") {
+    prob = p.prob_o15;
+    reale = (g > 1.5) ? 1 : 0;
+  } else if (esito === "U25") {
+    prob = p.prob_u25;
+    reale = (g < 2.5) ? 1 : 0;
+  } else if (esito === "O25") {
+    prob = p.prob_o25;
+    reale = (g > 2.5) ? 1 : 0;
+  } else if (esito === "U35") {
+    prob = p.prob_u35;
+    reale = (g < 3.5) ? 1 : 0;
+  } else if (esito === "O35") {
+    prob = p.prob_o35;
+    reale = (g > 3.5) ? 1 : 0;
+  } else if (esito === "U45") {
+    prob = p.prob_u45;
+    reale = (g < 4.5) ? 1 : 0;
+  } else if (esito === "O45") {
+    prob = p.prob_o45;
+    reale = (g > 4.5) ? 1 : 0;
+  } else if (esito === "SG0") {
+    prob = p.prob_sg0;
+    reale = (g === 0) ? 1 : 0;
+  } else if (esito === "SG1") {
+    prob = p.prob_sg1;
+    reale = (g === 1) ? 1 : 0;
+  } else if (esito === "SG2") {
+    prob = p.prob_sg2;
+    reale = (g === 2) ? 1 : 0;
+  } else if (esito === "SG3") {
+    prob = p.prob_sg3;
+    reale = (g === 3) ? 1 : 0;
+  } else if (esito === "SG4") {
+    prob = p.prob_sg4;
+    reale = (g === 4) ? 1 : 0;
+  } else if (esito === "SG5") {
+    prob = p.prob_sg5;
+    reale = (g === 5) ? 1 : 0;
+  } else if (esito === "SG6p") {
+    prob = p.prob_sg6p;
+    reale = (g >= 6) ? 1 : 0;
+  }
+
+  return { prob, reale };
+}
+
 function calcolaBrierSingoloEsito(partite, esito) {
   let sommaErrori = 0;
   let conteggioValidi = 0;
 
   for (const p of partite) {
-    const g = p.fthg + p.ftag;
-    let probabilitaStima = 0;
-    let realeVerificato = 0;
-
-    if (esito === "1") {
-      probabilitaStima = p.prob_1;
-      realeVerificato = (p.fthg > p.ftag) ? 1 : 0;
-    } else if (esito === "X") {
-      probabilitaStima = p.prob_X;
-      realeVerificato = (p.fthg === p.ftag) ? 1 : 0;
-    } else if (esito === "2") {
-      probabilitaStima = p.prob_2;
-      realeVerificato = (p.fthg < p.ftag) ? 1 : 0;
-    } else if (esito === "GG") {
-      probabilitaStima = p.prob_gg;
-      realeVerificato = (p.fthg > 0 && p.ftag > 0) ? 1 : 0;
-    } else if (esito === "NG") {
-      probabilitaStima = p.prob_ng;
-      realeVerificato = (p.fthg === 0 || p.ftag === 0) ? 1 : 0;
-    } else if (esito === "U05") {
-      probabilitaStima = p.prob_u05;
-      realeVerificato = (g < 0.5) ? 1 : 0;
-    } else if (esito === "O05") {
-      probabilitaStima = p.prob_o05;
-      realeVerificato = (g > 0.5) ? 1 : 0;
-    } else if (esito === "U15") {
-      probabilitaStima = p.prob_u15;
-      realeVerificato = (g < 1.5) ? 1 : 0;
-    } else if (esito === "O15") {
-      probabilitaStima = p.prob_o15;
-      realeVerificato = (g > 1.5) ? 1 : 0;
-    } else if (esito === "U25") {
-      probabilitaStima = p.prob_u25;
-      realeVerificato = (g < 2.5) ? 1 : 0;
-    } else if (esito === "O25") {
-      probabilitaStima = p.prob_o25;
-      realeVerificato = (g > 2.5) ? 1 : 0;
-    } else if (esito === "U35") {
-      probabilitaStima = p.prob_u35;
-      realeVerificato = (g < 3.5) ? 1 : 0;
-    } else if (esito === "O35") {
-      probabilitaStima = p.prob_o35;
-      realeVerificato = (g > 3.5) ? 1 : 0;
-    } else if (esito === "U45") {
-      probabilitaStima = p.prob_u45;
-      realeVerificato = (g < 4.5) ? 1 : 0;
-    } else if (esito === "O45") {
-      probabilitaStima = p.prob_o45;
-      realeVerificato = (g > 4.5) ? 1 : 0;
-    } else if (esito === "SG0") {
-      probabilitaStima = p.prob_sg0;
-      realeVerificato = (g === 0) ? 1 : 0;
-    } else if (esito === "SG1") {
-      probabilitaStima = p.prob_sg1;
-      realeVerificato = (g === 1) ? 1 : 0;
-    } else if (esito === "SG2") {
-      probabilitaStima = p.prob_sg2;
-      realeVerificato = (g === 2) ? 1 : 0;
-    } else if (esito === "SG3") {
-      probabilitaStima = p.prob_sg3;
-      realeVerificato = (g === 3) ? 1 : 0;
-    } else if (esito === "SG4") {
-      probabilitaStima = p.prob_sg4;
-      realeVerificato = (g === 4) ? 1 : 0;
-    } else if (esito === "SG5") {
-      probabilitaStima = p.prob_sg5;
-      realeVerificato = (g === 5) ? 1 : 0;
-    } else if (esito === "SG6p") {
-      probabilitaStima = p.prob_sg6p;
-      realeVerificato = (g >= 6) ? 1 : 0;
-    } else {
-      continue;
-    }
-
-    if (probabilitaStima !== null && probabilitaStima !== undefined) {
-      const scarto = Math.pow(probabilitaStima - realeVerificato, 2);
-      const scartoOpposto = Math.pow((1 - probabilitaStima) - (1 - realeVerificato), 2);
+    const dati = estraiDatiPartitaPerEsito(p, esito);
+    if (dati.prob !== null && dati.prob !== undefined) {
+      const scarto = Math.pow(dati.prob - dati.reale, 2);
+      const scartoOpposto = Math.pow((1 - dati.prob) - (1 - dati.reale), 2);
       sommaErrori += (scarto + scartoOpposto);
       conteggioValidi += 1;
     }
@@ -219,22 +236,108 @@ function calcolaBrierSingoloEsito(partite, esito) {
   return sommaErrori / conteggioValidi;
 }
 
-// Restituisce le soglie specifiche per semaforo in base al tipo di mercato
 function ottieniSoglieSpecifiche(esito) {
-  // Gruppo 1: Ultra-Sbilanciati (U05, O05, SG0, SG5, SG6p)
   if (esito === "U05" || esito === "O05" || esito === "SG0" || esito === "SG5" || esito === "SG6p") {
     return { verde: 0.20, rosso: 0.30 };
   }
-  // Gruppo 2: Altamente Sbilanciati (U15, O15, U45, O45, SG1, SG4)
   if (esito === "U15" || esito === "O15" || esito === "U45" || esito === "O45" || esito === "SG1" || esito === "SG4") {
     return { verde: 0.35, rosso: 0.45 };
   }
-  // Gruppo 3: Binari Bilanciati (GG, NG, U25, O25, U35, O35, SG2, SG3)
   if (esito === "GG" || esito === "NG" || esito === "U25" || esito === "O25" || esito === "U35" || esito === "O35" || esito === "SG2" || esito === "SG3") {
     return { verde: 0.46, rosso: 0.50 };
   }
-  // Gruppo 4: Multiclasse 1X2 (1, X, 2)
   return { verde: 0.48, rosso: 0.55 };
+}
+
+// Esegue il motore di auto-calibrazione a 72 scenari in memoria per trovare la soglia attiva migliore
+function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
+  let migliorRendimento = 0.0;
+  let miglioreSogliaStandard = 100.0; // Valore di sicurezza di base (Bloccato)
+  let migliorePenaleYellow = 14;
+
+  // Precalcoliamo i limiti temporali delle date per evitare calcoli lenti nel ciclo
+  const limitiDateFiltro = {};
+  for (const w of finestreTemporali) {
+    limitiDateFiltro[w] = calcolaDataLimite(w);
+  }
+
+  for (const w of finestreTemporali) {
+    const dataLimite = limitiDateFiltro[w];
+    const partiteFinestra = [];
+    
+    // Filtro in memoria sequenziale velocissimo
+    for (const p of partite) {
+      if (p.date >= dataLimite) {
+        partiteFinestra.push(p);
+      }
+    }
+
+    const totaleFinestra = partiteFinestra.length;
+    if (totaleFinestra === 0) continue;
+
+    // Ciclo esteso per supportare lo smoothing di raggio fino a 3 sulle soglie 45-80
+    const precisioniRaw = {};
+    for (let t = 42; T_loop_val = t, t <= 83; t++) {
+      const sogliaDecimale = t / 100;
+      let countSuperati = 0;
+      let countVinti = 0;
+
+      for (const p of partiteFinestra) {
+        const dati = estraiDatiPartitaPerEsito(p, esito);
+        if (dati.prob >= sogliaDecimale) {
+          countSuperati += 1;
+          if (dati.reale === 1) {
+            countVinti += 1;
+          }
+        }
+      }
+
+      // Filtro di Sicurezza sul Volume
+      if (countSuperati < 15 || countSuperati < (totaleFinestra * 0.15)) {
+        precisioniRaw[t] = 0.0;
+      } else {
+        precisioniRaw[t] = countVinti / countSuperati;
+      }
+    }
+
+    for (const r of raggiSmussamento) {
+      for (const p of penaliGiallo) {
+        
+        // Ciclo principale di test sulle soglie candidate da 45% a 80%
+        for (let t = 45; t <= 80; t++) {
+          let sommaPrecisioniVicinato = 0;
+          const diametroVicini = (r * 2) + 1;
+
+          for (let v = (t - r); v <= (t + r); v++) {
+            sommaPrecisioniVicinato += (precisioniRaw[v] || 0.0);
+          }
+
+          const precisioneSmussata = sommaPrecisioniVicinato / diametroVicini;
+
+          // Se troviamo un rendimento migliore, aggiorniamo la configurazione vincente
+          if (precisioneSmussata > migliorRendimento) {
+            migliorRendimento = precisioneSmussata;
+            miglioreSogliaStandard = t;
+            migliorePenaleYellow = p;
+          }
+        }
+
+      }
+    }
+  }
+
+  // Se nessun candidato ha superato i requisiti minimi di sicurezza
+  if (migliorRendimento === 0.0) {
+    return 100.0; 
+  }
+
+  // Calcolo della soglia attiva finale in base al semaforo
+  if (semaforo === "VERDE") {
+    return miglioreSogliaStandard;
+  } else {
+    const sogliaCalcolata = miglioreSogliaStandard + migliorePenaleYellow;
+    return (sogliaCalcolata > 100) ? 100.0 : sogliaCalcolata;
+  }
 }
 
 async function elaboraSoglieCampionato(env, nazione, campionato) {
@@ -263,9 +366,10 @@ async function elaboraSoglieCampionato(env, nazione, campionato) {
       semaforo = "GIALLO";
     }
 
-    let sogliaAttiva = 0.0; 
-    if (semaforo === "ROSSO") {
-      sogliaAttiva = 100.0; // Freno d'emergenza attivo
+    let sogliaAttiva = 100.0;
+    if (semaforo !== "ROSSO") {
+      // Esegue la simulazione a 72 scenari solo per i mercati sani (Verdi e Gialli)
+      sogliaAttiva = eseguiCalibrazione72Scenari(partite, esito, semaforo);
     }
 
     chiamateBatch.push(
@@ -468,7 +572,7 @@ async function handleRequest(request, env) {
     ".btn-primary.active:hover { background-color: #dc2626; }",
     ".btn-danger { background-color: #9ca3af; color: white; }",
     ".btn-danger:hover { background-color: #4b5563; }",
-    ".griglia-semafori { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 8px; margin-top: 12px; padding: 12px; background: #f9fafb; border-radius: 6px; border: 1px solid #e5e7eb; }",
+    ".griglia-semafori { display: grid; grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 8px; margin-top: 12px; padding: 12px; background: #f9fafb; border-radius: 6px; border: 1px solid #e5e7eb; }",
     ".tassello-esito { padding: 8px 4px; text-align: center; border-radius: 4px; font-size: 11px; font-weight: bold; color: white; display: flex; flex-direction: column; gap: 2px; }",
     ".tassello-verde { background-color: #10b981; }",
     ".tassello-giallo { background-color: #f59e0b; }",
@@ -543,7 +647,7 @@ async function handleRequest(request, env) {
     "</tbody>",
     "</table>",
     "<div id='pannello-dettaglio-soglie' class='dettaglio-partite-container'>",
-    "<h3 id='titolo-dettaglio-soglie'>Esiti e Semafori</h3>",
+    "<h3 id='titolo-dettaglio-soglie'>Esiti, Semafori e Soglie Attive</h3>",
     "<div id='griglia-esiti-soglie' class='griglia-semafori'>",
     "</div>",
     "</div>",
@@ -700,7 +804,7 @@ async function handleRequest(request, env) {
     "  var pannello = document.getElementById('pannello-dettaglio-soglie');",
     "  var titolo = document.getElementById('titolo-dettaglio-soglie');",
     "  var griglia = document.getElementById('griglia-esiti-soglie');",
-    "  titolo.textContent = bandiera + ' Esiti e Semafori per ' + campionato;",
+    "  titolo.textContent = bandiera + ' Esiti, Semafori e Soglie per ' + campionato;",
     "  griglia.innerHTML = '<div style=\"grid-column: 1/-1; text-align:center;\">Caricamento...</div>';",
     "  pannello.style.display = 'block';",
     "  try {",
@@ -720,9 +824,14 @@ async function handleRequest(request, env) {
     "        var spanBrier = document.createElement('span');",
     "        spanBrier.style.fontSize = '9px';",
     "        spanBrier.style.opacity = '0.9';",
-    "        spanBrier.textContent = s.brier_score.toFixed(3);",
+    "        spanBrier.textContent = 'B: ' + s.brier_score.toFixed(3);",
+    "        var spanSoglia = document.createElement('span');",
+    "        spanSoglia.style.fontSize = '11px';",
+    "        spanSoglia.style.fontWeight = 'bold';",
+    "        spanSoglia.textContent = 'S: ' + Math.round(s.soglia_attiva) + '%';",
     "        div.appendChild(spanEsito);",
     "        div.appendChild(spanBrier);",
+    "        div.appendChild(spanSoglia);",
     "        griglia.appendChild(div);",
     "      });",
     "    }",
@@ -836,7 +945,7 @@ async function handleRequest(request, env) {
     "    var res = await fetch('/api/elabora-soglia-singola', {",
     "      method: 'POST',",
     "      headers: { 'Content-Type': 'application/json' },",
-    "      body: JSON.stringify({ nazione: prossimo. nazione, campionato: prossimo.campionato })",
+    "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
     "    });",
     "    if (res.ok) {",
     "      var ris = await res.json();",
