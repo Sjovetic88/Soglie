@@ -1,34 +1,3 @@
-const bandiereNazioni = {
-  "italy": "🇮🇹",
-  "italia": "🇮🇹",
-  "england": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-  "inghilterra": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-  "spain": "🇪🇸",
-  "spagna": "🇪🇸",
-  "germany": "🇩🇪",
-  "germania": "🇩🇪",
-  "france": "🇫🇷",
-  "francia": "🇫🇷",
-  "netherlands": "🇳🇱",
-  "olanda": "🇳🇱",
-  "belgium": "🇧🇪",
-  "belgio": "🇧🇪",
-  "portugal": "🇵🇹",
-  "portogallo": "🇵🇹",
-  "turkey": "🇹🇷",
-  "turchia": "🇹🇷",
-  "greece": "🇬🇷",
-  "grecia": "🇬🇷",
-  "scotland": "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
-  "scozia": "🏴󠁧󠁢󠁳󠁣󠁴󠁿"
-};
-
-function ottieniBandiera(nazione) {
-  if (!nazione) return "🏳️";
-  const nazioneLower = nazione.toLowerCase();
-  return bandiereNazioni[nazioneLower] || "🏳️";
-}
-
 function calcolaDateIntervallo() {
   const oggi = new Date();
   const milleGiorniFa = new Date();
@@ -60,7 +29,6 @@ async function inizializzaSeNecessario(env, forzaReset) {
     }
   }
 
-  // Svuota completamente le tabelle locali di stato e delle partite copiate
   await env.DB_SOGLIE.prepare("DELETE FROM sync_stato_campionati").run();
   await env.DB_SOGLIE.prepare("DELETE FROM partite_filtrate").run();
 
@@ -79,7 +47,6 @@ async function inizializzaSeNecessario(env, forzaReset) {
   }
 }
 
-// Estrae le partite reali dal DB Sorgente e le inserisce a lotti nel DB Destinazione
 async function copiaPartiteCampionato(env, nazione, campionato, dataInizio, dataFine) {
   const queryPartite = await env.DB_PRONOSTICI.prepare(
     "SELECT * FROM validazione_risultati WHERE nazione = ? AND campionato = ? AND date >= ? AND date <= ?"
@@ -124,7 +91,6 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
 
   if (!statoCamp) return 0;
 
-  // Esegue la copia reale delle righe nel database di destinazione
   const totaleCopiate = await copiaPartiteCampionato(
     env, nazione, campionato, statoCamp.data_inizio, statoCamp.data_fine
   );
@@ -149,12 +115,65 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
+  // API: Stato attuale + Recupero dinamico bandiere da DB_ARCHIVIO regole_leghe
   if (url.pathname === "/api/stato") {
     try {
       const elenco = await env.DB_SOGLIE.prepare(
         "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati FROM sync_stato_campionati"
       ).all();
-      return new Response(JSON.stringify(elenco.results || []), {
+
+      const regole = await env.DB_ARCHIVIO.prepare(
+        "SELECT div, bandiera FROM regole_leghe WHERE bandiera IS NOT NULL"
+      ).all();
+
+      const mappaBandiere = {};
+      if (regole.results) {
+        for (const r of regole.results) {
+          mappaBandiere[r.div] = r.bandiera;
+        }
+      }
+
+      const campionatiConBandiere = (elenco.results || []).map(item => {
+        return {
+          nazione: item.nazione,
+          campionato: item.campionato,
+          data_inizio: item.data_inizio,
+          data_fine: item.data_fine,
+          stato: item.stato,
+          match_elaborati: item.match_elaborati,
+          bandiera: mappaBandiere[item.campionato] || "🏳️"
+        };
+      });
+
+      return new Response(JSON.stringify(campionatiConBandiere), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: err.message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+
+  // API: Estrae e restituisce le partite salvate in locale per un campionato
+  if (url.pathname === "/api/partite-salvate") {
+    try {
+      const campionato = url.searchParams.get("campionato");
+      const nazione = url.searchParams.get("nazione");
+
+      if (!campionato || !nazione) {
+        return new Response(JSON.stringify({ error: "Parametri errati" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const partite = await env.DB_SOGLIE.prepare(
+        "SELECT date, home_team, away_team, fthg, ftag, prob_1, prob_X, prob_2 FROM partite_filtrate WHERE nazione = ? AND campionato = ? ORDER BY date DESC"
+      ).bind(nazione, campionato).all();
+
+      return new Response(JSON.stringify(partite.results || []), {
         headers: { "Content-Type": "application/json" }
       });
     } catch (err) {
@@ -168,7 +187,7 @@ async function handleRequest(request, env) {
   if (url.pathname === "/api/reset" && request.method === "POST") {
     try {
       await inizializzaSeNecessario(env, true);
-      return new Response(JSON.stringify({ success: true, message: "Database ripristinato" }), {
+      return new Response(JSON.stringify({ success: true, message: "Resettato" }), {
         headers: { "Content-Type": "application/json" }
       });
     } catch (err) {
@@ -184,13 +203,6 @@ async function handleRequest(request, env) {
       const dati = await request.json();
       const nazione = dati.nazione;
       const campionato = dati.campionato;
-
-      if (!nazione || !campionato) {
-        return new Response(JSON.stringify({ error: "Dati incompleti" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
 
       await env.DB_SOGLIE.prepare(
         "UPDATE sync_stato_campionati SET stato = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
@@ -232,11 +244,13 @@ async function handleRequest(request, env) {
     "table { width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 20px; }",
     "th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; font-size: 14px; }",
     "th { background-color: #f9fafb; color: #4b5563; }",
+    "tr.riga-campionato { cursor: pointer; transition: background-color 0.15s; }",
+    "tr.riga-campionato:hover { background-color: #f3f4f6; }",
     ".badge { display: inline-block; padding: 4px 8px; font-size: 11px; font-weight: bold; border-radius: 9999px; text-transform: uppercase; }",
     ".badge-pending { background-color: #e5e7eb; color: #374151; }",
     ".badge-processing { background-color: #dbeafe; color: #1e40af; animation: pulse 1.5s infinite; }",
     ".badge-completed { background-color: #d1fae5; color: #065f46; }",
-    ".console-box { background-color: #111827; color: #10b981; padding: 16px; border-radius: 6px; font-family: monospace; font-size: 12px; height: 150px; overflow-y: auto; margin-top: 20px; border: 1px solid #374151; }",
+    ".console-box { background-color: #111827; color: #10b981; padding: 16px; border-radius: 6px; font-family: monospace; font-size: 12px; height: 120px; overflow-y: auto; margin-top: 20px; border: 1px solid #374151; }",
     ".bottom-bar { position: fixed; bottom: 0; left: 0; right: 0; background-color: #ffffff; border-top: 1px solid #e5e7eb; padding: 16px 20px; display: flex; justify-content: center; gap: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,0.05); z-index: 100; }",
     ".btn { padding: 10px 20px; font-size: 14px; font-weight: bold; border-radius: 6px; cursor: pointer; border: none; transition: background-color 0.2s; }",
     ".btn-primary { background-color: #3b82f6; color: white; }",
@@ -245,6 +259,9 @@ async function handleRequest(request, env) {
     ".btn-primary.active:hover { background-color: #dc2626; }",
     ".btn-danger { background-color: #9ca3af; color: white; }",
     ".btn-danger:hover { background-color: #4b5563; }",
+    ".dettaglio-partite-container { margin-top: 24px; padding: 20px; background-color: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb; display: none; }",
+    ".dettaglio-partite-container h3 { margin-top: 0; font-size: 18px; color: #111827; }",
+    ".lista-partite-scroll { max-height: 250px; overflow-y: auto; background: white; border: 1px solid #e5e7eb; border-radius: 6px; }",
     "@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }",
     "</style>",
     "</head>",
@@ -262,21 +279,39 @@ async function handleRequest(request, env) {
     "<div class='progress-container'>",
     "<div id='barra-progresso' class='progress-bar'></div>",
     "</div>",
+    "<p style='font-size: 13px; color: #6b7280; margin-bottom: 8px;'>💡 Clicca su una riga completata per visualizzare l'anteprima delle partite filtrate.</p>",
     "<table>",
     "<thead>",
     "<tr>",
     "<th>Campionato</th>",
     "<th>Intervallo Date</th>",
     "<th>Stato</th>",
-    "<th>Match Estratti e Salvati</th>",
+    "<th>Match Salvati</th>",
     "</tr>",
     "</thead>",
     "<tbody id='tabella-corpo'>",
     "</tbody>",
     "</table>",
+    "<div id='pannello-dettaglio' class='dettaglio-partite-container'>",
+    "<h3 id='titolo-dettaglio'>Partite Salvate</h3>",
+    "<div class='lista-partite-scroll'>",
+    "<table>",
+    "<thead>",
+    "<tr>",
+    "<th>Data</th>",
+    "<th>Partita</th>",
+    "<th>Ris.</th>",
+    "<th>1X2 Prob.</th>",
+    "</tr>",
+    "</thead>",
+    "<tbody id='tabella-partite-dettaglio'>",
+    "</tbody>",
+    "</table>",
+    "</div>",
+    "</div>",
     "<h3>Log Operazioni</h3>",
     "<div id='console-log' class='console-box'>",
-    "<p style='color: #9ca3af; margin: 0;'>Pannello di controllo pronto. Clicca 'Avvia Sincronizzazione' in fondo per iniziare...</p>",
+    "<p style='color: #9ca3af; margin: 0;'>Pannello pronto. Clicca 'Avvia Sincronizzazione' per iniziare la copia dei dati...</p>",
     "</div>",
     "</div>",
     "<div class='bottom-bar'>",
@@ -287,12 +322,6 @@ async function handleRequest(request, env) {
     "var campionatiInteri = [];",
     "var nitroAttiva = false;",
     "var elaborazioneInCorso = false;",
-    "var mappaBandiere = " + JSON.stringify(bandiereNazioni) + ";",
-    "function ottieniBandieraClient(nazione) {",
-    "  if (!nazione) return '🏳️';",
-    "  var n = nazione.toLowerCase();",
-    "  return mappaBandiere[n] || '🏳️';",
-    "}",
     "function scriviLog(testo, tipo) {",
     "  var consoleBox = document.getElementById('console-log');",
     "  var p = document.createElement('p');",
@@ -315,8 +344,10 @@ async function handleRequest(request, env) {
     "  tbody.innerHTML = '';",
     "  dati.forEach(function(item) {",
     "    var tr = document.createElement('tr');",
+    "    tr.className = 'riga-campionato';",
+    "    tr.onclick = function() { mostraDettaglioPartite(item.nazione, item.campionato, item.bandiera, item.stato); };",
     "    var tdCamp = document.createElement('td');",
-    "    tdCamp.innerHTML = ottieniBandieraClient(item.nazione) + ' ' + item.campionato;",
+    "    tdCamp.innerHTML = item.bandiera + ' ' + item.campionato;",
     "    var tdDate = document.createElement('td');",
     "    tdDate.textContent = item.data_inizio + ' a ' + item.data_fine;",
     "    var tdStato = document.createElement('td');",
@@ -334,6 +365,49 @@ async function handleRequest(request, env) {
     "  });",
     "  var perc = calcolaPercentuale(dati);",
     "  document.getElementById('barra-progresso').style.width = perc + '%';",
+    "}",
+    "async function mostraDettaglioPartite(nazione, campionato, bandiera, stato) {",
+    "  if (stato !== 'COMPLETED') {",
+    "    alert('Puoi visualizzare l anteprima solo per i campionati completati.');",
+    "    return;",
+    "  }",
+    "  var pannello = document.getElementById('pannello-dettaglio');",
+    "  var titolo = document.getElementById('titolo-dettaglio');",
+    "  var tbody = document.getElementById('tabella-partite-dettaglio');",
+    "  titolo.textContent = bandiera + ' Partite Salvate per ' + campionato;",
+    "  tbody.innerHTML = '<tr><td colspan=4 style=\"text-align:center;\">Caricamento in corso...</td></tr>';",
+    "  pannello.style.display = 'block';",
+    "  try {",
+    "    var res = await fetch('/api/partite-salvate?nazione=' + encodeURIComponent(nazione) + '&campionato=' + encodeURIComponent(campionato));",
+    "    if (res.ok) {",
+    "      var partite = await res.json();",
+    "      tbody.innerHTML = '';",
+    "      if (partite.length === 0) {",
+    "        tbody.innerHTML = '<tr><td colspan=4 style=\"text-align:center;\">Nessuna partita copiata</td></tr>';",
+    "        return;",
+    "      }",
+    "      partite.forEach(function(p) {",
+    "        var tr = document.createElement('tr');",
+    "        var tdData = document.createElement('td');",
+    "        tdData.textContent = p.date;",
+    "        var tdPartita = document.createElement('td');",
+    "        tdPartita.innerHTML = '<b>' + p.home_team + '</b> - ' + p.away_team;",
+    "        var tdRis = document.createElement('td');",
+    "        tdRis.textContent = p.fthg + '-' + p.ftag;",
+    "        var tdProb = document.createElement('td');",
+    "        tdProb.textContent = Math.round(p.prob_1 * 100) + '% / ' + Math.round(p.prob_X * 100) + '% / ' + Math.round(p.prob_2 * 100) + '%';",
+    "        tr.appendChild(tdData);",
+    "        tr.appendChild(tdPartita);",
+    "        tr.appendChild(tdRis);",
+    "        tr.appendChild(tdProb);",
+    "        tbody.appendChild(tr);",
+    "      });",
+    "    } else {",
+    "      tbody.innerHTML = '<tr><td colspan=4 style=\"text-align:center;color:red;\">Errore nel caricamento delle partite</td></tr>';",
+    "    }",
+    "  } catch(e) {",
+    "    tbody.innerHTML = '<tr><td colspan=4 style=\"text-align:center;color:red;\">Errore di connessione</td></tr>';",
+    "  }",
     "}",
     "async function aggiornaStato() {",
     "  try {",
@@ -411,6 +485,7 @@ async function handleRequest(request, env) {
     "        btn.className = 'btn btn-primary';",
     "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
     "        document.getElementById('stato-operazione').className = 'status-bg';",
+    "        document.getElementById('pannello-dettaglio').style.display = 'none';",
     "        await aggiornaStato();",
     "      } else {",
     "        scriviLog('Errore durante la richiesta di reset.', 'error');",
@@ -427,7 +502,7 @@ async function handleRequest(request, env) {
     "    document.getElementById('stato-operazione').className = 'status-bg';",
     "    scriviLog('Interfaccia inattiva. Il controllo della copia dati passa al Background Server.', 'info');",
     "  } else if (!document.hidden && !nitroAttiva && document.getElementById('btn-start').style.display !== 'none') {",
-    "    scriviLog('Pannello riattivato. Premi nuovamente Avvia per riprendere la copia dati ultraveloce.', 'info');",
+    "    scriviLog('Pannello riattivato. Premi nuovamente Avvia per riprendere la copia dati.', 'info');",
     "  }",
     "});",
     "aggiornaStato();",
