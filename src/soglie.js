@@ -1,4 +1,3 @@
-// Dizionario per mappare i nomi delle nazioni alle relative bandiere emoji
 const bandiereNazioni = {
   "italy": "🇮🇹",
   "italia": "🇮🇹",
@@ -24,14 +23,12 @@ const bandiereNazioni = {
   "scozia": "🏴󠁧󠁢󠁳󠁣󠁴󠁿"
 };
 
-// Funzione helper per ottenere l'emoji della bandiera
 function ottieniBandiera(nazione) {
   if (!nazione) return "🏳️";
   const nazioneLower = nazione.toLowerCase();
   return bandiereNazioni[nazioneLower] || "🏳️";
 }
 
-// Funzione helper per calcolare le date (Oggi e 1000 giorni fa)
 function calcolaDateIntervallo() {
   const oggi = new Date();
   const milleGiorniFa = new Date();
@@ -50,23 +47,22 @@ function calcolaDateIntervallo() {
   };
 }
 
-// Logica per rilevare automaticamente i campionati dal DB sorgente e inserirli in quello di destinazione
-async function inizializzaSeNecessario(env) {
+// Inizializza o forza il reset dei dati
+async function inizializzaSeNecessario(env, forzaReset) {
   const date = calcolaDateIntervallo();
   
-  // Verifichiamo se ci sono già record per la giornata di oggi
-  const controllo = await env.DB_SOGLIE.prepare(
-    "SELECT COUNT(*) as totale FROM sync_stato_campionati WHERE data_fine = ?"
-  ).bind(date.oggi).first();
+  if (!forzaReset) {
+    const controllo = await env.DB_SOGLIE.prepare(
+      "SELECT COUNT(*) as totale FROM sync_stato_campionati WHERE data_fine = ?"
+    ).bind(date.oggi).first();
 
-  if (controllo && controllo.totale > 0) {
-    return; // Sincronizzazione odierna già configurata
+    if (controllo && controllo.totale > 0) {
+      return;
+    }
   }
 
-  // Eliminiamo i vecchi stati di sincronizzazione precedenti
   await env.DB_SOGLIE.prepare("DELETE FROM sync_stato_campionati").run();
 
-  // Estraiamo tutti i campionati unici dal database dei pronostici
   const campionatiSorgente = await env.DB_PRONOSTICI.prepare(
     "SELECT DISTINCT nazione, campionato FROM validazione_risultati WHERE nazione IS NOT NULL AND campionato IS NOT NULL"
   ).all();
@@ -74,7 +70,6 @@ async function inizializzaSeNecessario(env) {
   if (campionatiSorgente.results && campionatiSorgente.results.length > 0) {
     const timestampOra = new Date().toISOString();
     
-    // Inseriamo i campionati trovati nel database di stato impostandoli come PENDING
     for (const riga of campionatiSorgente.results) {
       await env.DB_SOGLIE.prepare(
         "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento) VALUES (?, ?, ?, ?, 'PENDING', 0, ?)"
@@ -83,7 +78,6 @@ async function inizializzaSeNecessario(env) {
   }
 }
 
-// Elabora le partite di un singolo campionato specifico
 async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
   const statoCamp = await env.DB_SOGLIE.prepare(
     "SELECT data_inizio, data_fine FROM sync_stato_campionati WHERE nazione = ? AND campionato = ?"
@@ -91,7 +85,6 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
 
   if (!statoCamp) return 0;
 
-  // Conta e simula l'estrazione delle partite comprese nell'intervallo temporale
   const conteggioMatch = await env.DB_PRONOSTICI.prepare(
     "SELECT COUNT(*) as totale FROM validazione_risultati WHERE nazione = ? AND campionato = ? AND date >= ? AND date <= ?"
   ).bind(nazione, campionato, statoCamp.data_inizio, statoCamp.data_fine).first();
@@ -99,7 +92,6 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
   const totalePartite = conteggioMatch ? conteggioMatch.totale : 0;
   const timestampOra = new Date().toISOString();
 
-  // Aggiorna lo stato nel database di destinazione
   await env.DB_SOGLIE.prepare(
     "UPDATE sync_stato_campionati SET stato = 'COMPLETED', match_elaborati = ?, ultimo_aggiornamento = ? WHERE nazione = ? AND campionato = ?"
   ).bind(totalePartite, timestampOra, nazione, campionato).run();
@@ -107,19 +99,18 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
   return totalePartite;
 }
 
-// Handler principale delle richieste HTTP (Dashboard e API)
 async function handleRequest(request, env) {
   const url = new URL(request.url);
 
-  // Forza l'inizializzazione automatica per assicurare che il database non sia mai vuoto
   try {
-    await inizializzaSeNecessario(env);
+    if (url.pathname !== "/api/reset") {
+      await inizializzaSeNecessario(env, false);
+    }
   } catch (err) {
-    // Continua l'esecuzione anche se l'inizializzazione fallisce, restituendo l'errore in console
-    console.error("Errore inizializzazione: " + err.message);
+    console.error("Errore inizializzazione automatica: " + err.message);
   }
 
-  // API: Restituisce lo stato attuale della sincronizzazione in JSON
+  // API: Stato attuale
   if (url.pathname === "/api/stato") {
     try {
       const elenco = await env.DB_SOGLIE.prepare(
@@ -136,7 +127,22 @@ async function handleRequest(request, env) {
     }
   }
 
-  // API: Elabora un singolo campionato in modalità Nitro o sincrona
+  // API: Reset database
+  if (url.pathname === "/api/reset" && request.method === "POST") {
+    try {
+      await inizializzaSeNecessario(env, true);
+      return new Response(JSON.stringify({ success: true, message: "Database resettato correttamente" }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({ error: err.message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+
+  // API: Elabora singolo record
   if (url.pathname === "/api/elabora-singolo" && request.method === "POST") {
     try {
       const dati = await request.json();
@@ -144,7 +150,7 @@ async function handleRequest(request, env) {
       const campionato = dati.campionato;
 
       if (!nazione || !campionato) {
-        return new Response(JSON.stringify({ error: "Dati mancanti" }), {
+        return new Response(JSON.stringify({ error: "Parametri mancanti" }), {
           status: 400,
           headers: { "Content-Type": "application/json" }
         });
@@ -167,7 +173,7 @@ async function handleRequest(request, env) {
     }
   }
 
-  // Interfaccia HTML della Dashboard (Nessun backtick e nessuna barra rovesciata nel codice JS client o server)
+  // Generazione della Dashboard HTML
   const dateAttuali = calcolaDateIntervallo();
   
   const htmlComponenti = [
@@ -178,21 +184,32 @@ async function handleRequest(request, env) {
     "<title>Sincronizzazione Campionati</title>",
     "<meta name='viewport' content='width=device-width, initial-scale=1'>",
     "<style>",
-    "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; color: #1f2937; margin: 0; padding: 20px; }",
+    "body { font-family: system-ui, -apple-system, sans-serif; background-color: #f3f4f6; color: #1f2937; margin: 0; padding: 20px 20px 100px 20px; }",
     ".container { max-width: 800px; margin: 0 auto; background: white; padding: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }",
     "h1 { font-size: 24px; margin-top: 0; color: #111827; }",
     ".info-box { background-color: #eff6ff; border-left: 4px solid #3b82f6; padding: 12px 16px; margin-bottom: 20px; border-radius: 0 4px 4px 0; }",
     ".info-box p { margin: 4px 0; font-size: 14px; }",
-    ".status-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding: 12px; border-radius: 6px; background: #f9fafb; font-weight: bold; }",
+    ".status-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding: 12px; border-radius: 6px; background: #f9fafb; font-weight: bold; }",
     ".status-nitro { color: #10b981; }",
     ".status-bg { color: #f59e0b; }",
-    "table { width: 100%; border-collapse: collapse; margin-top: 10px; }",
+    ".progress-container { background-color: #e5e7eb; border-radius: 4px; height: 10px; width: 100%; margin-bottom: 20px; overflow: hidden; }",
+    ".progress-bar { background-color: #3b82f6; height: 100%; width: 0%; transition: width 0.4s ease; }",
+    "table { width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 20px; }",
     "th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; font-size: 14px; }",
     "th { background-color: #f9fafb; color: #4b5563; }",
     ".badge { display: inline-block; padding: 4px 8px; font-size: 11px; font-weight: bold; border-radius: 9999px; text-transform: uppercase; }",
     ".badge-pending { background-color: #e5e7eb; color: #374151; }",
     ".badge-processing { background-color: #dbeafe; color: #1e40af; animation: pulse 1.5s infinite; }",
     ".badge-completed { background-color: #d1fae5; color: #065f46; }",
+    ".console-box { background-color: #111827; color: #10b981; padding: 16px; border-radius: 6px; font-family: monospace; font-size: 12px; height: 150px; overflow-y: auto; margin-top: 20px; border: 1px solid #374151; }",
+    ".bottom-bar { position: fixed; bottom: 0; left: 0; right: 0; background-color: #ffffff; border-top: 1px solid #e5e7eb; padding: 16px 20px; display: flex; justify-content: center; gap: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,0.05); z-index: 100; }",
+    ".btn { padding: 10px 20px; font-size: 14px; font-weight: bold; border-radius: 6px; cursor: pointer; border: none; transition: background-color 0.2s; }",
+    ".btn-primary { background-color: #3b82f6; color: white; }",
+    ".btn-primary:hover { background-color: #2563eb; }",
+    ".btn-primary.active { background-color: #ef4444; }",
+    ".btn-primary.active:hover { background-color: #dc2626; }",
+    ".btn-danger { background-color: #9ca3af; color: white; }",
+    ".btn-danger:hover { background-color: #4b5563; }",
     "@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }",
     "</style>",
     "</head>",
@@ -205,7 +222,10 @@ async function handleRequest(request, env) {
     "</div>",
     "<div class='status-container'>",
     "<span>Stato Sincronizzazione:</span>",
-    "<span id='stato-operazione' class='status-nitro'>Verifica stato in corso...</span>",
+    "<span id='stato-operazione' class='status-bg'>In attesa di avvio manuale</span>",
+    "</div>",
+    "<div class='progress-container'>",
+    "<div id='barra-progresso' class='progress-bar'></div>",
     "</div>",
     "<table>",
     "<thead>",
@@ -219,16 +239,41 @@ async function handleRequest(request, env) {
     "<tbody id='tabella-corpo'>",
     "</tbody>",
     "</table>",
+    "<h3>Log Operazioni</h3>",
+    "<div id='console-log' class='console-box'>",
+    "<p style='color: #9ca3af; margin: 0;'>Pannello di controllo pronto. Clicca 'Avvia Sincronizzazione' in fondo per iniziare...</p>",
+    "</div>",
+    "</div>",
+    "<div class='bottom-bar'>",
+    "<button id='btn-start' class='btn btn-primary' onclick='toggleSincronizzazione()'>Avvia Sincronizzazione</button>",
+    "<button id='btn-reset' class='btn btn-danger' onclick='confermaReset()'>Reset Totale</button>",
     "</div>",
     "<script>",
     "var campionatiInteri = [];",
-    "var nitroAttiva = true;",
+    "var nitroAttiva = false;",
     "var elaborazioneInCorso = false;",
     "var mappaBandiere = " + JSON.stringify(bandiereNazioni) + ";",
     "function ottieniBandieraClient(nazione) {",
     "  if (!nazione) return '🏳️';",
     "  var n = nazione.toLowerCase();",
     "  return mappaBandiere[n] || '🏳️';",
+    "}",
+    "function scriviLog(testo, tipo) {",
+    "  var consoleBox = document.getElementById('console-log');",
+    "  var p = document.createElement('p');",
+    "  var ora = new Date().toLocaleTimeString();",
+    "  p.textContent = '[' + ora + '] ' + testo;",
+    "  p.style.margin = '2px 0';",
+    "  if (tipo === 'success') p.style.color = '#10b981';",
+    "  if (tipo === 'info') p.style.color = '#3b82f6';",
+    "  if (tipo === 'error') p.style.color = '#ef4444';",
+    "  consoleBox.appendChild(p);",
+    "  consoleBox.scrollTop = consoleBox.scrollHeight;",
+    "}",
+    "function calcolaPercentuale(dati) {",
+    "  if (!dati.length) return 0;",
+    "  var completati = dati.filter(function(item) { return item.stato === 'COMPLETED'; }).length;",
+    "  return Math.round((completati / dati.length) * 100);",
     "}",
     "function renderizzaTabella(dati) {",
     "  var tbody = document.getElementById('tabella-corpo');",
@@ -252,6 +297,8 @@ async function handleRequest(request, env) {
     "    tr.appendChild(tdMatch);",
     "    tbody.appendChild(tr);",
     "  });",
+    "  var perc = calcolaPercentuale(dati);",
+    "  document.getElementById('barra-progresso').style.width = perc + '%';",
     "}",
     "async function aggiornaStato() {",
     "  try {",
@@ -262,7 +309,26 @@ async function handleRequest(request, env) {
     "      eseguiLoopSincronizzazione();",
     "    }",
     "  } catch(e) {",
-    "    console.error('Errore aggiornamento:', e);",
+    "    scriviLog('Errore di connessione API: ' + e.message, 'error');",
+    "  }",
+    "}",
+    "function toggleSincronizzazione() {",
+    "  var btn = document.getElementById('btn-start');",
+    "  if (nitroAttiva) {",
+    "    nitroAttiva = false;",
+    "    btn.textContent = 'Avvia Sincronizzazione';",
+    "    btn.className = 'btn btn-primary';",
+    "    document.getElementById('stato-operazione').textContent = 'In pausa (Manuale)';",
+    "    document.getElementById('stato-operazione').className = 'status-bg';",
+    "    scriviLog('Sincronizzazione messa in pausa dall\\'utente.', 'info');",
+    "  } else {",
+    "    nitroAttiva = true;",
+    "    btn.textContent = 'Sospendi Sincronizzazione';",
+    "    btn.className = 'btn btn-primary active';",
+    "    document.getElementById('stato-operazione').textContent = 'Modalità Nitro Attiva';",
+    "    document.getElementById('stato-operazione').className = 'status-nitro';",
+    "    scriviLog('Inizio estrazione match guidata dal client...', 'info');",
+    "    aggiornaStato();",
     "  }",
     "}",
     "async function eseguiLoopSincronizzazione() {",
@@ -271,11 +337,12 @@ async function handleRequest(request, env) {
     "  if (!prossimo) {",
     "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione Giornaliera Completata';",
     "    document.getElementById('stato-operazione').className = 'status-nitro';",
+    "    document.getElementById('btn-start').style.display = 'none';",
+    "    scriviLog('Sincronizzazione di tutti i campionati completata con successo.', 'success');",
     "    return;",
     "  }",
     "  elaborazioneInCorso = true;",
-    "  document.getElementById('stato-operazione').textContent = 'Modalità Nitro: Elaborazione ' + prossimo.campionato + '...';",
-    "  document.getElementById('stato-operazione').className = 'status-nitro';",
+    "  scriviLog('Avvio elaborazione: ' + prossimo.campionato, 'info');",
     "  try {",
     "    var res = await fetch('/api/elabora-singolo', {",
     "      method: 'POST',",
@@ -283,25 +350,51 @@ async function handleRequest(request, env) {
     "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
     "    });",
     "    if (res.ok) {",
+    "      var ris = await res.json();",
+    "      scriviLog('Completato ' + prossimo.campionato + ' con ' + ris.match_elaborati + ' match estratti', 'success');",
     "      await aggiornaStato();",
+    "    } else {",
+    "      scriviLog('Errore durante l\\'elaborazione di ' + prossimo.campionato, 'error');",
     "    }",
     "  } catch(e) {",
-    "    console.error('Errore durante elaborazione:', e);",
+    "    scriviLog('Errore di rete: ' + e.message, 'error');",
     "  } finally {",
     "    elaborazioneInCorso = false;",
     "  }",
     "}",
+    "async function confermaReset() {",
+    "  if (confirm('Sei sicuro di voler cancellare tutto e resettare il database allo stato iniziale?')) {",
+    "    scriviLog('Richiesta di reset totale inviata...', 'info');",
+    "    try {",
+    "      var res = await fetch('/api/reset', { method: 'POST' });",
+    "      if (res.ok) {",
+    "        scriviLog('Reset completato con successo. Database reinizializzato.', 'success');",
+    "        nitroAttiva = false;",
+    "        var btn = document.getElementById('btn-start');",
+    "        btn.style.display = 'inline-block';",
+    "        btn.textContent = 'Avvia Sincronizzazione';",
+    "        btn.className = 'btn btn-primary';",
+    "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
+    "        document.getElementById('stato-operazione').className = 'status-bg';",
+    "        await aggiornaStato();",
+    "      } else {",
+    "        scriviLog('Errore durante la richiesta di reset.', 'error');",
+    "      }",
+    "    } catch(e) {",
+    "      scriviLog('Errore connessione reset: ' + e.message, 'error');",
+    "    }",
+    "  }",
+    "}",
     "document.addEventListener('visibilitychange', function() {",
-    "  if (document.hidden) {",
+    "  if (document.hidden && nitroAttiva) {",
     "    nitroAttiva = false;",
     "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
     "    document.getElementById('stato-operazione').className = 'status-bg';",
-    "  } else {",
-    "    nitroAttiva = true;",
-    "    aggiornaStato();",
+    "    scriviLog('Schermo spento o scheda inattiva. Il controllo passa al Background Server.', 'info');",
+    "  } else if (!document.hidden && !nitroAttiva && document.getElementById('btn-start').style.display !== 'none') {",
+    "    scriviLog('Schermo riattivato. Clicca Avvia per riattivare la Modalità Nitro.', 'info');",
     "  }",
     "});",
-    "setInterval(aggiornaStato, 5000);",
     "aggiornaStato();",
     "</script>",
     "</body>",
@@ -314,12 +407,9 @@ async function handleRequest(request, env) {
   });
 }
 
-// Handler per l'esecuzione pianificata a Mezzanotte (Cron Trigger)
 async function handleScheduled(event, env) {
-  // Inizializza automaticamente i campionati per la nuova giornata azzerando la tabella di stato
-  await inizializzaSeNecessario(env);
+  await inizializzaSeNecessario(env, false);
 
-  // Trova il primo campionato in PENDING ed elaboralo per dare inizio al processo in background
   const prossimoCampionato = await env.DB_SOGLIE.prepare(
     "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'PENDING' LIMIT 1"
   ).first();
@@ -336,7 +426,6 @@ async function handleScheduled(event, env) {
   }
 }
 
-// Esporta le due interfacce di esecuzione del Worker Cloudflare
 export default {
   async fetch(request, env, ctx) {
     return handleRequest(request, env);
