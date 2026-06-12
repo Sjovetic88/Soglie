@@ -14,3 +14,8 @@ database_id = "6f393ca6-0ebc-4f37-98db-3df8857222ed"
 binding = "DB_SOGLIE"
 database_name = "soglie_campionati"
 database_id = "6bde4e75-41f2-40c1-85e7-4abd5a045043" 
+
+[[d1_databases]]
+binding = "DB_ARCHIVIO"
+database_name = "archivio_partite"
+database_id = "dd9a583d-ee1c-4114-891a-bd44b17ec1e7"
