@@ -141,7 +141,6 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
   return totaleCopiate;
 }
 
-// Estrae la probabilita stimata e l'esito reale di una partita per un determinato esito
 function estraiDatiPartitaPerEsito(p, esito) {
   const g = p.fthg + p.ftag;
   let prob = 0;
@@ -249,13 +248,11 @@ function ottieniSoglieSpecifiche(esito) {
   return { verde: 0.48, rosso: 0.55 };
 }
 
-// Esegue il motore di auto-calibrazione a 72 scenari in memoria per trovare la soglia attiva migliore
 function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
   let migliorRendimento = 0.0;
-  let miglioreSogliaStandard = 100.0; // Valore di sicurezza di base (Bloccato)
+  let miglioreSogliaStandard = 100.0; 
   let migliorePenaleYellow = 14;
 
-  // Precalcoliamo i limiti temporali delle date per evitare calcoli lenti nel ciclo
   const limitiDateFiltro = {};
   for (const w of finestreTemporali) {
     limitiDateFiltro[w] = calcolaDataLimite(w);
@@ -265,7 +262,6 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
     const dataLimite = limitiDateFiltro[w];
     const partiteFinestra = [];
     
-    // Filtro in memoria sequenziale velocissimo
     for (const p of partite) {
       if (p.date >= dataLimite) {
         partiteFinestra.push(p);
@@ -275,9 +271,8 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
     const totaleFinestra = partiteFinestra.length;
     if (totaleFinestra === 0) continue;
 
-    // Ciclo esteso per supportare lo smoothing di raggio fino a 3 sulle soglie 45-80
     const precisioniRaw = {};
-    for (let t = 42; T_loop_val = t, t <= 83; t++) {
+    for (let t = 42; t <= 83; t++) {
       const sogliaDecimale = t / 100;
       let countSuperati = 0;
       let countVinti = 0;
@@ -292,7 +287,6 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
         }
       }
 
-      // Filtro di Sicurezza sul Volume
       if (countSuperati < 15 || countSuperati < (totaleFinestra * 0.15)) {
         precisioniRaw[t] = 0.0;
       } else {
@@ -303,7 +297,6 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
     for (const r of raggiSmussamento) {
       for (const p of penaliGiallo) {
         
-        // Ciclo principale di test sulle soglie candidate da 45% a 80%
         for (let t = 45; t <= 80; t++) {
           let sommaPrecisioniVicinato = 0;
           const diametroVicini = (r * 2) + 1;
@@ -314,7 +307,6 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
 
           const precisioneSmussata = sommaPrecisioniVicinato / diametroVicini;
 
-          // Se troviamo un rendimento migliore, aggiorniamo la configurazione vincente
           if (precisioneSmussata > migliorRendimento) {
             migliorRendimento = precisioneSmussata;
             miglioreSogliaStandard = t;
@@ -326,12 +318,10 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
     }
   }
 
-  // Se nessun candidato ha superato i requisiti minimi di sicurezza
   if (migliorRendimento === 0.0) {
     return 100.0; 
   }
 
-  // Calcolo della soglia attiva finale in base al semaforo
   if (semaforo === "VERDE") {
     return miglioreSogliaStandard;
   } else {
@@ -368,7 +358,6 @@ async function elaboraSoglieCampionato(env, nazione, campionato) {
 
     let sogliaAttiva = 100.0;
     if (semaforo !== "ROSSO") {
-      // Esegue la simulazione a 72 scenari solo per i mercati sani (Verdi e Gialli)
       sogliaAttiva = eseguiCalibrazione72Scenari(partite, esito, semaforo);
     }
 
@@ -844,6 +833,7 @@ async function handleRequest(request, env) {
     "    var res = await fetch('/api/stato');",
     "    if (res.ok) {",
     "      campionatiInteri = await res.json();",
+    "      renderizzaTabellaPartite(cancellato = campionatiInteri);",
     "      renderizzaTabellaPartite(campionatiInteri);",
     "      renderizzaTabellaSoglie(campionatiInteri);",
     "      aggiornaBarraProgresso();",
