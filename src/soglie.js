@@ -246,7 +246,7 @@ async function elaboraSoglieCampionato(env, nazione, campionato) {
 
     let sogliaAttiva = 0.0; 
     if (semaforo === "ROSSO") {
-      sogliaAttiva = 100.0; // Freno d'emergenza
+      sogliaAttiva = 100.0; 
     }
 
     chiamateBatch.push(
@@ -531,7 +531,7 @@ async function handleRequest(request, env) {
     "</div>",
     "<h3>Log Operazioni</h3>",
     "<div id='console-log' class='console-box'>",
-    "<p style='color: #9ca3af; margin: 0;'>Pannello pronto. Scegli un\\'operazione in fondo per iniziare...</p>",
+    "<p style='color: #9ca3af; margin: 0;'>Pannello pronto. Scegli un'operazione in fondo per iniziare...</p>",
     "</div>",
     "</div>",
     "<div class='bottom-bar'>",
@@ -882,7 +882,6 @@ async function handleRequest(request, env) {
 async function handleScheduled(event, env) {
   await inizializzaSeNecessario(env, false);
 
-  // Background: priorita alla copia dei match
   const prossimoMatch = await env.DB_SOGLIE.prepare(
     "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'PENDING' LIMIT 1"
   ).first();
@@ -899,7 +898,6 @@ async function handleScheduled(event, env) {
     return;
   }
 
-  // Se i match sono tutti copiati, calcola i semafori in background uno alla volta
   const prossimoSemaforo = await env.DB_SOGLIE.prepare(
     "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'COMPLETED' AND stato_soglie = 'PENDING' LIMIT 1"
   ).first();
