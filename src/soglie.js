@@ -47,7 +47,6 @@ function calcolaDateIntervallo() {
   };
 }
 
-// Inizializza o forza il reset dei dati
 async function inizializzaSeNecessario(env, forzaReset) {
   const date = calcolaDateIntervallo();
   
@@ -61,7 +60,9 @@ async function inizializzaSeNecessario(env, forzaReset) {
     }
   }
 
+  // Svuota completamente le tabelle locali di stato e delle partite copiate
   await env.DB_SOGLIE.prepare("DELETE FROM sync_stato_campionati").run();
+  await env.DB_SOGLIE.prepare("DELETE FROM partite_filtrate").run();
 
   const campionatiSorgente = await env.DB_PRONOSTICI.prepare(
     "SELECT DISTINCT nazione, campionato FROM validazione_risultati WHERE nazione IS NOT NULL AND campionato IS NOT NULL"
@@ -78,6 +79,44 @@ async function inizializzaSeNecessario(env, forzaReset) {
   }
 }
 
+// Estrae le partite reali dal DB Sorgente e le inserisce a lotti nel DB Destinazione
+async function copiaPartiteCampionato(env, nazione, campionato, dataInizio, dataFine) {
+  const queryPartite = await env.DB_PRONOSTICI.prepare(
+    "SELECT * FROM validazione_risultati WHERE nazione = ? AND campionato = ? AND date >= ? AND date <= ?"
+  ).bind(nazione, campionato, dataInizio, dataFine).all();
+
+  const partite = queryPartite.results || [];
+  if (partite.length === 0) return 0;
+
+  const insertQuery = "INSERT OR REPLACE INTO partite_filtrate (match_id, date, nazione, campionato, home_team, away_team, fthg, ftag, prob_1, prob_X, prob_2, brier_score_1X2, prob_gg, prob_ng, brier_score_ggng, prob_u05, prob_o05, prob_u15, prob_o15, prob_u25, prob_o25, brier_score_uo25, prob_u35, prob_o35, prob_u45, prob_o45, prob_sg0, prob_sg1, prob_sg2, prob_sg3, prob_sg4, prob_sg5, prob_sg6, prob_sg6p, top1_score, top1_prob, top2_score, top2_prob, top3_score, top3_prob, yield, season) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+  const statementPreparato = env.DB_SOGLIE.prepare(insertQuery);
+  const dimensioneLotto = 50;
+
+  for (let i = 0; i < partite.length; i += dimensioneLotto) {
+    const lotto = partite.slice(i, i + dimensioneLotto);
+    const chiamateBatch = [];
+
+    for (const p of lotto) {
+      chiamateBatch.push(
+        statementPreparato.bind(
+          p.match_id, p.date, p.nazione, p.campionato, p.home_team, p.away_team,
+          p.fthg, p.ftag, p.prob_1, p.prob_X, p.prob_2, p.brier_score_1X2,
+          p.prob_gg, p.prob_ng, p.brier_score_ggng, p.prob_u05, p.prob_o05,
+          p.prob_u15, p.prob_o15, p.prob_u25, p.prob_o25, p.brier_score_uo25,
+          p.prob_u35, p.prob_o35, p.prob_u45, p.prob_o45, p.prob_sg0, p.prob_sg1,
+          p.prob_sg2, p.prob_sg3, p.prob_sg4, p.prob_sg5, p.prob_sg6, p.prob_sg6p,
+          p.top1_score, p.top1_prob, p.top2_score, p.top2_prob, p.top3_score, p.top3_prob,
+          p.yield, p.season
+        )
+      );
+    }
+    await env.DB_SOGLIE.batch(chiamateBatch);
+  }
+
+  return partite.length;
+}
+
 async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
   const statoCamp = await env.DB_SOGLIE.prepare(
     "SELECT data_inizio, data_fine FROM sync_stato_campionati WHERE nazione = ? AND campionato = ?"
@@ -85,18 +124,18 @@ async function elaboraSincronizzazioneCampionato(env, nazione, campionato) {
 
   if (!statoCamp) return 0;
 
-  const conteggioMatch = await env.DB_PRONOSTICI.prepare(
-    "SELECT COUNT(*) as totale FROM validazione_risultati WHERE nazione = ? AND campionato = ? AND date >= ? AND date <= ?"
-  ).bind(nazione, campionato, statoCamp.data_inizio, statoCamp.data_fine).first();
+  // Esegue la copia reale delle righe nel database di destinazione
+  const totaleCopiate = await copiaPartiteCampionato(
+    env, nazione, campionato, statoCamp.data_inizio, statoCamp.data_fine
+  );
 
-  const totalePartite = conteggioMatch ? conteggioMatch.totale : 0;
   const timestampOra = new Date().toISOString();
 
   await env.DB_SOGLIE.prepare(
     "UPDATE sync_stato_campionati SET stato = 'COMPLETED', match_elaborati = ?, ultimo_aggiornamento = ? WHERE nazione = ? AND campionato = ?"
-  ).bind(totalePartite, timestampOra, nazione, campionato).run();
+  ).bind(totaleCopiate, timestampOra, nazione, campionato).run();
 
-  return totalePartite;
+  return totaleCopiate;
 }
 
 async function handleRequest(request, env) {
@@ -110,7 +149,6 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
-  // API: Stato attuale
   if (url.pathname === "/api/stato") {
     try {
       const elenco = await env.DB_SOGLIE.prepare(
@@ -127,11 +165,10 @@ async function handleRequest(request, env) {
     }
   }
 
-  // API: Reset database
   if (url.pathname === "/api/reset" && request.method === "POST") {
     try {
       await inizializzaSeNecessario(env, true);
-      return new Response(JSON.stringify({ success: true, message: "Database resettato correttamente" }), {
+      return new Response(JSON.stringify({ success: true, message: "Database ripristinato" }), {
         headers: { "Content-Type": "application/json" }
       });
     } catch (err) {
@@ -142,7 +179,6 @@ async function handleRequest(request, env) {
     }
   }
 
-  // API: Elabora singolo record
   if (url.pathname === "/api/elabora-singolo" && request.method === "POST") {
     try {
       const dati = await request.json();
@@ -150,7 +186,7 @@ async function handleRequest(request, env) {
       const campionato = dati.campionato;
 
       if (!nazione || !campionato) {
-        return new Response(JSON.stringify({ error: "Parametri mancanti" }), {
+        return new Response(JSON.stringify({ error: "Dati incompleti" }), {
           status: 400,
           headers: { "Content-Type": "application/json" }
         });
@@ -173,7 +209,6 @@ async function handleRequest(request, env) {
     }
   }
 
-  // Generazione della Dashboard HTML
   const dateAttuali = calcolaDateIntervallo();
   
   const htmlComponenti = [
@@ -233,7 +268,7 @@ async function handleRequest(request, env) {
     "<th>Campionato</th>",
     "<th>Intervallo Date</th>",
     "<th>Stato</th>",
-    "<th>Match Estratti</th>",
+    "<th>Match Estratti e Salvati</th>",
     "</tr>",
     "</thead>",
     "<tbody id='tabella-corpo'>",
@@ -327,7 +362,7 @@ async function handleRequest(request, env) {
     "    btn.className = 'btn btn-primary active';",
     "    document.getElementById('stato-operazione').textContent = 'Modalità Nitro Attiva';",
     "    document.getElementById('stato-operazione').className = 'status-nitro';",
-    "    scriviLog('Inizio estrazione match guidata dal client...', 'info');",
+    "    scriviLog('Inizio copia reale dei dati guidata dal client...', 'info');",
     "    aggiornaStato();",
     "  }",
     "}",
@@ -338,11 +373,11 @@ async function handleRequest(request, env) {
     "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione Giornaliera Completata';",
     "    document.getElementById('stato-operazione').className = 'status-nitro';",
     "    document.getElementById('btn-start').style.display = 'none';",
-    "    scriviLog('Sincronizzazione di tutti i campionati completata con successo.', 'success');",
+    "    scriviLog('Estrazione e copia dei dati storici terminata con successo.', 'success');",
     "    return;",
     "  }",
     "  elaborazioneInCorso = true;",
-    "  scriviLog('Avvio elaborazione: ' + prossimo.campionato, 'info');",
+    "  scriviLog('Copia dati storici per: ' + prossimo.campionato, 'info');",
     "  try {",
     "    var res = await fetch('/api/elabora-singolo', {",
     "      method: 'POST',",
@@ -351,24 +386,24 @@ async function handleRequest(request, env) {
     "    });",
     "    if (res.ok) {",
     "      var ris = await res.json();",
-    "      scriviLog('Completato ' + prossimo.campionato + ' con ' + ris.match_elaborati + ' match estratti', 'success');",
-    "      await aggiornaStato();",
+    "      scriviLog('Salvate fisicamente ' + ris.match_elaborati + ' partite per ' + prossimo.campionato, 'success');",
     "    } else {",
-    "      scriviLog('Errore durante l\\'elaborazione di ' + prossimo.campionato, 'error');",
+    "      scriviLog('Errore durante la copia dati di ' + prossimo.campionato, 'error');",
     "    }",
     "  } catch(e) {",
     "    scriviLog('Errore di rete: ' + e.message, 'error');",
     "  } finally {",
     "    elaborazioneInCorso = false;",
+    "    await aggiornaStato();",
     "  }",
     "}",
     "async function confermaReset() {",
-    "  if (confirm('Sei sicuro di voler cancellare tutto e resettare il database allo stato iniziale?')) {",
-    "    scriviLog('Richiesta di reset totale inviata...', 'info');",
+    "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
+    "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
     "    try {",
     "      var res = await fetch('/api/reset', { method: 'POST' });",
     "      if (res.ok) {",
-    "        scriviLog('Reset completato con successo. Database reinizializzato.', 'success');",
+    "        scriviLog('Database ripulito e resettato con successo.', 'success');",
     "        nitroAttiva = false;",
     "        var btn = document.getElementById('btn-start');",
     "        btn.style.display = 'inline-block';",
@@ -390,9 +425,9 @@ async function handleRequest(request, env) {
     "    nitroAttiva = false;",
     "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
     "    document.getElementById('stato-operazione').className = 'status-bg';",
-    "    scriviLog('Schermo spento o scheda inattiva. Il controllo passa al Background Server.', 'info');",
+    "    scriviLog('Interfaccia inattiva. Il controllo della copia dati passa al Background Server.', 'info');",
     "  } else if (!document.hidden && !nitroAttiva && document.getElementById('btn-start').style.display !== 'none') {",
-    "    scriviLog('Schermo riattivato. Clicca Avvia per riattivare la Modalità Nitro.', 'info');",
+    "    scriviLog('Pannello riattivato. Premi nuovamente Avvia per riprendere la copia dati ultraveloce.', 'info');",
     "  }",
     "});",
     "aggiornaStato();",
