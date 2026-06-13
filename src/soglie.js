@@ -13,16 +13,21 @@ function calcolaDateIntervallo() {
   const milleGiorniFa = new Date();
   milleGiorniFa.setDate(oggi.getDate() - 1000);
 
-  const formattaData = (d) => {
-    const anno = d.getFullYear();
-    const mese = String(d.getMonth() + 1).padStart(2, "0");
-    const giorno = String(d.getDate()).padStart(2, "0");
-    return anno + "-" + mese + "-" + giorno;
+  const pad = (n) => String(n).padStart(2, "0");
+
+  const formattaDB = (d) => {
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  };
+
+  const formattaDisplay = (d) => {
+    return pad(d.getDate()) + "-" + pad(d.getMonth() + 1) + "-" + d.getFullYear();
   };
 
   return {
-    oggi: formattaData(oggi),
-    inizio: formattaData(milleGiorniFa)
+    dbOggi: formattaDB(oggi),
+    dbInizio: formattaDB(milleGiorniFa),
+    dispOggi: formattaDisplay(oggi),
+    dispInizio: formattaDisplay(milleGiorniFa)
   };
 }
 
@@ -58,7 +63,7 @@ async function inizializzaSeNecessario(env, forzaReset) {
   if (!forzaReset) {
     const controllo = await env.DB_SOGLIE.prepare(
       "SELECT COUNT(*) as totale FROM sync_stato_campionati WHERE data_fine = ?"
-    ).bind(date.oggi).first();
+    ).bind(date.dbOggi).first();
 
     if (controllo && controllo.totale > 0) {
       return;
@@ -79,7 +84,7 @@ async function inizializzaSeNecessario(env, forzaReset) {
     for (const riga of campionatiSorgente.results) {
       await env.DB_SOGLIE.prepare(
         "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, 'PENDING')"
-      ).bind(riga.nazione, riga.campionato, date.inizio, date.oggi, timestampOra).run();
+      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi, timestampOra).run();
     }
   }
 }
@@ -386,7 +391,7 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
-  // Endpoint strategico per il Worker del Weekend
+  // API strategica per la validazione automatica del Worker del Weekend
   if (url.pathname === "/api/ottieni-soglia") {
     try {
       const campionato = url.searchParams.get("campionato");
@@ -398,7 +403,7 @@ async function handleRequest(request, env) {
           esito: "",
           semaforo: "ROSSO",
           soglia_attiva: 100.0,
-          avviso: "Parametri mancanti. Sicurezza attiva (100% bloccata)."
+          avviso: "Parametri di richiesta mancanti. Scommessa bloccata di sicurezza."
         }), {
           headers: { "Content-Type": "application/json" }
         });
@@ -414,7 +419,7 @@ async function handleRequest(request, env) {
           esito: esito,
           semaforo: "ROSSO",
           soglia_attiva: 100.0,
-          avviso: "Soglia non trovata nel database. Scommessa bloccata."
+          avviso: "Soglia non trovata nel database. Scommessa bloccata di sicurezza."
         }), {
           headers: { "Content-Type": "application/json" }
         });
@@ -434,7 +439,7 @@ async function handleRequest(request, env) {
         esito: url.searchParams.get("esito") || "",
         semaforo: "ROSSO",
         soglia_attiva: 100.0,
-        avviso: "Errore interno: " + err.message + ". Sicurezza attiva."
+        avviso: "Errore interno durante il recupero: " + err.message + ". Sicurezza applicata."
       }), {
         status: 500,
         headers: { "Content-Type": "application/json" }
@@ -446,8 +451,9 @@ async function handleRequest(request, env) {
 
   if (url.pathname === "/api/stato") {
     try {
+      // Sincronizzazioni filtrate e ORDINATE ALFABETICAMENTE per campionato
       const elenco = await env.DB_SOGLIE.prepare(
-        "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati, stato_soglie FROM sync_stato_campionati"
+        "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati, stato_soglie FROM sync_stato_campionati ORDER BY campionato ASC"
       ).all();
 
       const campionatiConBandiere = (elenco.results || []).map(item => {
@@ -608,11 +614,11 @@ async function handleRequest(request, env) {
     ".riga-card .dettaglio-date { font-size: 12px; color: #666666; }",
     ".riga-card .valore-destra { font-size: 14px; font-weight: bold; color: #00e5ff; display: flex; align-items: center; gap: 12px; }",
     ".riga-card .valore-destra .badge-stato { font-size: 11px; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; font-weight: 800; }",
-    ".badge-stato-pending { background-color: #1a1a1a; color: #666666; }",
+    ".badge-stato-pending { background-color: #1a1a1a; color: #888888; }",
     ".badge-stato-processing { background-color: #0d2a3a; color: #00e5ff; animation: pulse 1.5s infinite; }",
     ".badge-stato-completed { background-color: #0c2d1c; color: #10b981; }",
     ".griglia-semafori { display: grid; grid-template-columns: repeat(auto-fill, minmax(75px, 1fr)); gap: 8px; margin-top: 12px; padding: 12px; background: #0c0c0c; border: 1px solid #1a1a1a; border-radius: 8px; }",
-    ".tassello-esito { padding: 10px 4px; text-align: center; border-radius: 6px; font-size: 12px; font-weight: bold; display: flex; flex-direction: column; gap: 4px; border: 1px solid transparent; }",
+    ".tassello-esito { padding: 10px 4px; text-align: center; border-radius: 4px; font-size: 12px; font-weight: bold; display: flex; flex-direction: column; gap: 2px; border: 1px solid transparent; }",
     ".tassello-verde { background-color: #061c15; color: #10b981; border-color: #0c4a34; }",
     ".tassello-giallo { background-color: #211504; color: #f59e0b; border-color: #452403; }",
     ".tassello-rosso { background-color: #220808; color: #ef4444; border-color: #4c1111; }",
@@ -639,9 +645,9 @@ async function handleRequest(request, env) {
     "</head>",
     "<body>",
     "<div class='container'>",
-    "<h1>GOLDBET <span>ENGINE - SOGLIE</span></h1>",
+    "<h1><i style='font-style: italic; font-weight: 800; letter-spacing: 0.5px;'>GOLDBET</i> <span>SOGLIE</span></h1>",
     "<div class='info-box'>",
-    "<p><strong>Oggi:</strong> " + dateAttuali.oggi + " | <strong>Inizio intervallo (1000 gg fa):</strong> " + dateAttuali.inizio + "</p>",
+    "<p>Intervallo dal <span>" + dateAttuali.dispInizio + "</span> al <span>" + dateAttuali.dispOggi + "</span></p>",
     "</div>",
     "<div class='tab-header'>",
     "<button id='tab-btn-partite' class='tab-button active' onclick='cambiaScheda(\"partite\")'>1. Copia Partite</button>",
@@ -737,6 +743,13 @@ async function handleRequest(request, env) {
     "  var perc = Math.round((completati / campionatiInteri.length) * 100);",
     "  document.getElementById('barra-progresso').style.width = perc + '%';",
     "}",
+    "function ottieniStatoFormattato(stato) {",
+    "  var s = stato.toUpperCase();",
+    "  if (s === 'PENDING') return '⚪ PENDING';",
+    "  if (s === 'COMPLETED') return '🟢 COMPLETED';",
+    "  if (s === 'PROCESSING') return '🔵 PROCESSING';",
+    "  return stato;",
+    "}",
     "function renderizzaTabellaPartite(dati) {",
     "  var container = document.getElementById('lista-campionati-partite');",
     "  container.innerHTML = '';",
@@ -758,7 +771,7 @@ async function handleRequest(request, env) {
     "    valoreDestra.className = 'valore-destra';",
     "    var badge = document.createElement('span');",
     "    badge.className = 'badge-stato badge-stato-' + item.stato.toLowerCase();",
-    "    badge.textContent = item.stato;",
+    "    badge.textContent = ottieniStatoFormattato(item.stato);",
     "    var matchCount = document.createElement('span');",
     "    matchCount.style.color = '#666666';",
     "    matchCount.style.fontSize = '12px';",
@@ -791,7 +804,7 @@ async function handleRequest(request, env) {
     "    valoreDestra.className = 'valore-destra';",
     "    var badge = document.createElement('span');",
     "    badge.className = 'badge-stato badge-stato-' + item.stato_soglie.toLowerCase();",
-    "    badge.textContent = item.stato_soglie;",
+    "    badge.textContent = ottieniStatoFormattato(item.stato_soglie);",
     "    valoreDestra.appendChild(badge);",
     "    card.appendChild(infoSinistra);",
     "    card.appendChild(valoreDestra);",
@@ -986,68 +999,68 @@ async function handleRequest(request, env) {
     "  scriviLog('Avvio calcolo 22 semafori per: ' + prossimo.campionato, 'info');",
     "  try {",
     "    var res = await fetch('/api/elabora-soglia-singola', {",
-    "      method: 'POST',",
-    "      headers: { 'Content-Type': 'application/json' },",
-    "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
-    "    });",
-    "    if (res.ok) {",
-    "      var ris = await res.json();",
-    "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti. Freno applicato su Rossi.', 'success');",
-    "    }",
-    "  } catch(e) {",
-    "    scriviLog('Errore calcolo: ' + e.message, 'error');",
-    "  } finally {",
-    "    elaborazioneInCorso = false;",
-    "    await aggiornaStato();",
-    "  }",
-    "}",
-    "async function confermaReset() {",
-    "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
-    "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
-    "    try {",
-    "      var res = await fetch('/api/reset', { method: 'POST' });",
-    "      if (res.ok) {",
-    "        scriviLog('Database ripulito e resettato con successo.', 'success');",
-    "        nitroAttiva = false;",
-    "        calcoloSoglieAttivo = false;",
-    "        var btnStart = document.getElementById('btn-start');",
-    "        btnStart.style.display = 'inline-block';",
-    "        btnStart.textContent = 'Avvia Sincronizzazione';",
-    "        btnStart.className = 'btn btn-primary';",
-    "        var btnSoglie = document.getElementById('btn-soglie');",
-    "        btnSoglie.style.display = 'inline-block';",
-    "        btnSoglie.textContent = 'Calcola Semafori';",
-    "        btnSoglie.className = 'btn btn-primary';",
-    "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
-    "        document.getElementById('stato-operazione').className = 'status-bg';",
-    "        document.getElementById('pannello-dettaglio').style.display = 'none';",
-    "        document.getElementById('pannello-dettaglio-soglie').style.display = 'none';",
-    "        await aggiornaStato();",
-    "      }",
-    "    } catch(e) {",
-    "      scriviLog('Errore reset: ' + e.message, 'error');",
-    "    }",
-    "  }",
-    "}",
-    "document.addEventListener('visibilitychange', function() {",
-    "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
-    "    nitroAttiva = false;",
-    "    calcoloSoglieAttivo = false;",
-    "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
-    "    document.getElementById('stato-operazione').className = 'status-bg';",
-    "    scriviLog('Interfaccia inattiva. Il controllo passa al Background Server.', 'info');",
-    "  }",
-    "});",
-    "aggiornaStato();",
-    "</script>",
-    "</body>",
-    "</html>"
-  ];
+      "      method: 'POST',",
+      "      headers: { 'Content-Type': 'application/json' },",
+      "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
+      "    });",
+      "    if (res.ok) {",
+      "      var ris = await res.json();",
+      "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti. Freno applicato su Rossi.', 'success');",
+      "    }",
+      "  } catch(e) {",
+      "    scriviLog('Errore calcolo: ' + e.message, 'error');",
+      "  } finally {",
+      "    elaborazioneInCorso = false;",
+      "    await aggiornaStato();",
+      "  }",
+      "}",
+      "async function confermaReset() {",
+      "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
+      "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
+      "    try {",
+      "      var res = await fetch('/api/reset', { method: 'POST' });",
+      "      if (res.ok) {",
+      "        scriviLog('Database ripulito e resettato con successo.', 'success');",
+      "        nitroAttiva = false;",
+      "        calcoloSoglieAttivo = false;",
+      "        var btnStart = document.getElementById('btn-start');",
+      "        btnStart.style.display = 'inline-block';",
+      "        btnStart.textContent = 'Avvia Sincronizzazione';",
+      "        btnStart.className = 'btn btn-primary';",
+      "        var btnSoglie = document.getElementById('btn-soglie');",
+      "        btnSoglie.style.display = 'inline-block';",
+      "        btnSoglie.textContent = 'Calcola Semafori';",
+      "        btnSoglie.className = 'btn btn-primary';",
+      "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
+      "        document.getElementById('stato-operazione').className = 'status-bg';",
+      "        document.getElementById('pannello-dettaglio').style.display = 'none';",
+      "        document.getElementById('pannello-dettaglio-soglie').style.display = 'none';",
+      "        await aggiornaStato();",
+      "      }",
+      "    } catch(e) {",
+      "      scriviLog('Errore reset: ' + e.message, 'error');",
+      "    }",
+      "  }",
+      "}",
+      "document.addEventListener('visibilitychange', function() {",
+      "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
+      "    nitroAttiva = false;",
+      "    calcoloSoglieAttivo = false;",
+      "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
+      "    document.getElementById('stato-operazione').className = 'status-bg';",
+      "    scriviLog('Interfaccia inattiva. Il controllo passa al Background Server.', 'info');",
+      "  }",
+      "});",
+      "aggiornaStato();",
+      "</script>",
+      "</body>",
+      "</html>"
+    ];
 
-  const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
-  return new Response(htmlCorpoUnito, {
-    headers: { "Content-Type": "text/html; charset=utf-8" }
-  });
+    const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
+    return new Response(htmlCorpoUnito, {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    });
 }
 
 async function handleScheduled(event, env) {
