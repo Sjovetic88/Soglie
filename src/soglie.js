@@ -386,6 +386,62 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
+  // API strategica per la validazione automatica del Worker del Weekend (Fail-Safe attiva)
+  if (url.pathname === "/api/ottieni-soglia") {
+    try {
+      const campionato = url.searchParams.get("campionato");
+      const esito = url.searchParams.get("esito");
+
+      if (!campionato || !esito) {
+        return new Response(JSON.stringify({
+          campionato: "",
+          esito: "",
+          semaforo: "ROSSO",
+          soglia_attiva: 100.0,
+          avviso: "Parametri di richiesta mancanti. Scommessa bloccata di sicurezza."
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const record = await env.DB_SOGLIE.prepare(
+        "SELECT semaforo, soglia_attiva FROM soglie_calcolate WHERE campionato = ? AND esito = ?"
+      ).bind(campionato, esito).first();
+
+      if (!record) {
+        return new Response(JSON.stringify({
+          campionato: campionato,
+          esito: esito,
+          semaforo: "ROSSO",
+          soglia_attiva: 100.0,
+          avviso: "Soglia non trovata nel database. Scommessa bloccata di sicurezza."
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      return new Response(JSON.stringify({
+        campionato: campionato,
+        esito: esito,
+        semaforo: record.semaforo,
+        soglia_attiva: record.soglia_attiva
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({
+        campionato: url.searchParams.get("campionato") || "",
+        esito: url.searchParams.get("esito") || "",
+        semaforo: "ROSSO",
+        soglia_attiva: 100.0,
+        avviso: "Errore interno durante il recupero: " + err.message + ". Sicurezza applicata."
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+
   const mappaBandiereDinamica = await ottieniMappaBandiereDinamica(env);
 
   if (url.pathname === "/api/stato") {
@@ -833,7 +889,6 @@ async function handleRequest(request, env) {
     "    var res = await fetch('/api/stato');",
     "    if (res.ok) {",
     "      campionatiInteri = await res.json();",
-    "      renderizzaTabellaPartite(cancellato = campionatiInteri);",
     "      renderizzaTabellaPartite(campionatiInteri);",
     "      renderizzaTabellaSoglie(campionatiInteri);",
     "      aggiornaBarraProgresso();",
