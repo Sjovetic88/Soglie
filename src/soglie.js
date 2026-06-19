@@ -230,6 +230,37 @@ function estraiDatiPartitaPerEsito(p, esito) {
   return { prob, reale };
 }
 
+function calcolaBrierSingoloEsito(partite, esito) {
+  let sommaErrori = 0;
+  let conteggioValidi = 0;
+
+  for (const p of partite) {
+    const dati = estraiDatiPartitaPerEsito(p, esito);
+    if (dati.prob !== null && dati.prob !== undefined) {
+      const scarto = Math.pow(dati.prob - dati.reale, 2);
+      const scartoOpposto = Math.pow((1 - dati.prob) - (1 - dati.reale), 2);
+      sommaErrori += (scarto + scartoOpposto);
+      conteggioValidi += 1;
+    }
+  }
+
+  if (conteggioValidi === 0) return 2.0;
+  return sommaErrori / conteggioValidi;
+}
+
+function ottieniSoglieSpecifiche(esito) {
+  if (esito === "U05" || esito === "O05" || esito === "SG0" || esito === "SG5" || esito === "SG6p") {
+    return { verde: 0.20, rosso: 0.30 };
+  }
+  if (esito === "U15" || esito === "O15" || esito === "U45" || esito === "O45" || esito === "SG1" || esito === "SG4") {
+    return { verde: 0.35, rosso: 0.45 };
+  }
+  if (esito === "GG" || esito === "NG" || esito === "U25" || esito === "O25" || esito === "U35" || esito === "O35" || esito === "SG2" || esito === "SG3") {
+    return { verde: 0.46, rosso: 0.50 };
+  }
+  return { verde: 0.48, rosso: 0.55 };
+}
+
 function eseguiCalibrazione72Scenari(partiteEstrate, esito, semaforo) {
   let migliorRendimento = 0.0;
   let miglioreSogliaStandard = 100.0; 
@@ -388,13 +419,13 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
-  // API speciale di aggancio per bypassare i Cron di Cloudflare tramite Cron-Job.org
+  // API speciale di aggancio per bypassare i Cron di Cloudflare tramite Cron-Job.org (Sicurezza attiva)
   if (url.pathname === "/api/cron-background") {
-    const key = url.searchParams.get("key");
-    if (key !== "sogliesecret123") {
-      return new Response("Non autorizzato", { status: 403 });
-    }
     try {
+      const key = url.searchParams.get("key");
+      if (key !== "sogliesecret123") {
+        return new Response("Non autorizzato", { status: 403 });
+      }
       await handleScheduled(null, env);
       return new Response("OK - Cron background eseguito", {
         headers: { "Content-Type": "text/plain; charset=utf-8" }
@@ -542,66 +573,6 @@ async function handleRequest(request, env) {
       ).bind(nazione, campionato).all();
 
       return new Response(JSON.stringify(partite.results || []), {
-        headers: { "Content-Type": "application/json" }
-      });
-    } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-  }
-
-  if (url.pathname === "/api/reset" && request.method === "POST") {
-    try {
-      await inizializzaSeNecessario(env, true);
-      return new Response(JSON.stringify({ success: true, message: "Reset eseguito" }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-  }
-
-  if (url.pathname === "/api/elabora-singolo" && request.method === "POST") {
-    try {
-      const dati = await request.json();
-      const nazione = dati.nazione;
-      const campionato = dati.campionato;
-
-      await env.DB_SOGLIE.prepare(
-        "UPDATE sync_stato_campionati SET stato = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
-      ).bind(nazione, campionato).run();
-
-      const totaleMatch = await elaboraSincronizzazioneCampionato(env, nazione, campionato);
-
-      return new Response(JSON.stringify({ success: true, match_elaborati: totaleMatch }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-  }
-
-  if (url.pathname === "/api/elabora-soglia-singola" && request.method === "POST") {
-    try {
-      const dati = await request.json();
-      const nazione = dati.nazione;
-      const campionato = dati.campionato;
-
-      await env.DB_SOGLIE.prepare(
-        "UPDATE sync_stato_campionati SET stato_semafori = 'PROCESSING', stato_soglie = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
-      ).bind(nazione, campionato).run();
-
-      const esitiCalcolati = await elaboraSoglieCampionato(env, nazione, campionato);
-
-      return new Response(JSON.stringify({ success: true, esiti_calcolati: esitiCalcolati }), {
         headers: { "Content-Type": "application/json" }
       });
     } catch (err) {
@@ -1035,7 +1006,6 @@ async function handleRequest(request, env) {
     "  if (!prossimo) {",
     "    document.getElementById('stato-operazione').textContent = 'Processo Completato!';",
     "    document.getElementById('stato-operazione').className = 'status-nitro';",
-    "    document.getElementById('btn-start').style.display = 'none';",
     "    scriviLog('Calcolo terminato. Tutti i dati storici sono stati copiati e calibrati a 72 scenari.', 'success');",
     "    calcoloSoglieAttivo = false;",
     "    return;",
@@ -1050,57 +1020,57 @@ async function handleRequest(request, env) {
     "    });",
     "    if (res.ok) {",
     "      var ris = await res.json();",
-      "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti con auto-calibrazione attiva.', 'success');",
-      "    }",
-      "  } catch(e) {",
-      "    scriviLog('Errore calcolo: ' + e.message, 'error');",
-      "  } finally {",
-      "    elaborazioneInCorso = false;",
-      "    await aggiornaStato();",
-      "  }",
-      "}",
-      "async function confermaReset() {",
-      "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
-      "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
-      "    try {",
-      "      var res = await fetch('/api/reset', { method: 'POST' });",
-      "      if (res.ok) {",
-      "        scriviLog('Database ripulito e resettato con successo.', 'success');",
-      "        nitroAttiva = false;",
-      "        calcoloSoglieAttivo = false;",
-      "        var btnStart = document.getElementById('btn-start');",
-      "        btnStart.style.display = 'inline-block';",
-      "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
-      "        btnStart.className = 'btn btn-primary';",
-      "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
-      "        document.getElementById('stato-operazione').className = 'status-bg';",
-      "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
-      "        await aggiornaStato();",
-      "      }",
-      "    } catch(e) {",
-      "      scriviLog('Errore reset: ' + e.message, 'error');",
-      "    }",
-      "  }",
-      "}",
-      "document.addEventListener('visibilitychange', function() {",
-      "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
-      "    nitroAttiva = false;",
-      "    calcoloSoglieAttivo = false;",
-      "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
-      "    document.getElementById('stato-operazione').className = 'status-bg';",
-      "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
-      "  }",
-      "});",
-      "aggiornaStato();",
-      "</script>",
-      "</body>",
-      "</html>"
-    ];
+    "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti con auto-calibrazione attiva.', 'success');",
+    "    }",
+    "  } catch(e) {",
+    "    scriviLog('Errore calcolo: ' + e.message, 'error');",
+    "  } finally {",
+    "    elaborazioneInCorso = false;",
+    "    await aggiornaStato();",
+    "  }",
+    "}",
+    "async function confermaReset() {",
+    "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
+    "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
+    "    try {",
+    "      var res = await fetch('/api/reset', { method: 'POST' });",
+    "      if (res.ok) {",
+    "        scriviLog('Database ripulito e resettato con successo.', 'success');",
+    "        nitroAttiva = false;",
+    "        calcoloSoglieAttivo = false;",
+    "        var btnStart = document.getElementById('btn-start');",
+    "        btnStart.style.display = 'inline-block';",
+    "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
+    "        btnStart.className = 'btn btn-primary';",
+    "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
+    "        document.getElementById('stato-operazione').className = 'status-bg';",
+    "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
+    "        await aggiornaStato();",
+    "      }",
+    "    } catch(e) {",
+    "      scriviLog('Errore reset: ' + e.message, 'error');",
+    "    }",
+    "  }",
+    "}",
+    "document.addEventListener('visibilitychange', function() {",
+    "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
+    "    nitroAttiva = false;",
+    "    calcoloSoglieAttivo = false;",
+    "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
+    "    document.getElementById('stato-operazione').className = 'status-bg';",
+    "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
+    "  }",
+    "});",
+    "aggiornaStato();",
+    "</script>",
+    "</body>",
+    "</html>"
+  ];
 
-    const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
-    return new Response(htmlCorpoUnito, {
-      headers: { "Content-Type": "text/html; charset=utf-8" }
-    });
+  const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
+  return new Response(htmlCorpoUnito, {
+    headers: { "Content-Type": "text/html; charset=utf-8" }
+  });
 }
 
 async function handleScheduled(event, env) {
