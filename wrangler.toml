@@ -2,9 +2,6 @@ name = "soglia"
 main = "src/soglie.js"
 compatibility_date = "2024-03-01"
 
-[triggers]
-crons = ["* * * * *"]
-
 [[d1_databases]]
 binding = "DB_PRONOSTICI"
 database_name = "pronostici_partite"
