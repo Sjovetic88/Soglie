@@ -70,12 +70,10 @@ async function inizializzaSeNecessario(env, forzaReset) {
       const oraOra = new Date().getTime();
       const differenzaOre = (oraOra - oraUltimo) / (1000 * 60 * 60);
 
-      // Se l'ultimo aggiornamento completo è avvenuto meno di 6 ore fa, non resettiamo
       if (differenzaOre < 6.0) {
         return;
       }
     } else if (recordUltimo) {
-      // Se la tabella non è vuota ma l'ultimo aggiornamento è nullo, significa che la prima sincronizzazione è in corso
       return;
     }
   }
@@ -399,6 +397,81 @@ async function handleRequest(request, env) {
     }
   } catch (err) {
     console.error("Errore inizializzazione automatica: " + err.message);
+  }
+
+  // API strategica per la validazione automatica del Worker del Weekend
+  if (url.pathname === "/api/ottieni-soglia") {
+    try {
+      const campionato = url.searchParams.get("campionato");
+      const esito = url.searchParams.get("esito");
+
+      if (!campionato || !esito) {
+        return new Response(JSON.stringify({
+          campionato: "",
+          esito: "",
+          semaforo: "ROSSO",
+          soglia_attiva: 100.0,
+          avviso: "Parametri di richiesta mancanti. Scommessa bloccata di sicurezza."
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      const record = await env.DB_SOGLIE.prepare(
+        "SELECT semaforo, soglia_attiva FROM soglie_calcolate WHERE campionato = ? AND esito = ?"
+      ).bind(campionato, esito).first();
+
+      if (!record) {
+        return new Response(JSON.stringify({
+          campionato: campionato,
+          esito: esito,
+          semaforo: "ROSSO",
+          soglia_attiva: 100.0,
+          avviso: "Soglia non trovata nel database. Scommessa bloccata di sicurezza."
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      return new Response(JSON.stringify({
+        campionato: campionato,
+        esito: esito,
+        semaforo: record.semaforo,
+        soglia_attiva: record.soglia_attiva
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      return new Response(JSON.stringify({
+        campionato: url.searchParams.get("campionato") || "",
+        esito: url.searchParams.get("esito") || "",
+        semaforo: "ROSSO",
+        soglia_attiva: 100.0,
+        avviso: "Errore interno durante il recupero: " + err.message + ". Sicurezza applicata."
+      }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+
+  // API speciale di aggancio per bypassare i Cron di Cloudflare tramite Cron-Job.org (Sicurezza attiva)
+  if (url.pathname === "/api/cron-background") {
+    const key = url.searchParams.get("key");
+    if (key !== "sogliesecret123") {
+      return new Response("Non autorizzato", { status: 403 });
+    }
+    try {
+      await handleScheduled(null, env);
+      return new Response("OK - Cron eseguito con successo in background", {
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
+      });
+    } catch (err) {
+      return new Response("Errore di background: " + err.message, {
+        status: 500,
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
+      });
+    }
   }
 
   const mappaBandiereDinamica = await ottieniMappaBandiereDinamica(env);
@@ -999,43 +1072,43 @@ async function handleRequest(request, env) {
     "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
     "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
     "    try {",
-      "      var res = await fetch('/api/reset', { method: 'POST' });",
-      "      if (res.ok) {",
-      "        scriviLog('Database ripulito e resettato con successo.', 'success');",
-      "        nitroAttiva = false;",
-      "        calcoloSoglieAttivo = false;",
-      "        var btnStart = document.getElementById('btn-start');",
-      "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
-      "        btnStart.className = 'btn btn-primary';",
-      "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
-      "        document.getElementById('stato-operazione').className = 'status-bg';",
-      "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
-      "        await aggiornaStato();",
-      "      }",
-      "    } catch(e) {",
-      "      scriviLog('Errore reset: ' + e.message, 'error');",
-      "    }",
-      "  }",
-      "}",
-      "document.addEventListener('visibilitychange', function() {",
-      "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
-      "    nitroAttiva = false;",
-      "    calcoloSoglieAttivo = false;",
-      "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
-      "    document.getElementById('stato-operazione').className = 'status-bg';",
-      "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
-      "  }",
-      "});",
-      "aggiornaStato();",
-      "</script>",
-      "</body>",
-      "</html>"
-    ];
+    "      var res = await fetch('/api/reset', { method: 'POST' });",
+    "      if (res.ok) {",
+    "        scriviLog('Database ripulito e resettato con successo.', 'success');",
+    "        nitroAttiva = false;",
+    "        calcoloSoglieAttivo = false;",
+    "        var btnStart = document.getElementById('btn-start');",
+    "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
+    "        btnStart.className = 'btn btn-primary';",
+    "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
+    "        document.getElementById('stato-operazione').className = 'status-bg';",
+    "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
+    "        await aggiornaStato();",
+    "      }",
+    "    } catch(e) {",
+    "      scriviLog('Errore reset: ' + e.message, 'error');",
+    "    }",
+    "  }",
+    "}",
+    "document.addEventListener('visibilitychange', function() {",
+    "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
+    "    nitroAttiva = false;",
+    "    calcoloSoglieAttivo = false;",
+    "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
+    "    document.getElementById('stato-operazione').className = 'status-bg';",
+    "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
+    "  }",
+    "});",
+    "aggiornaStato();",
+    "</script>",
+    "</body>",
+    "</html>"
+  ];
 
-    const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
-    return new Response(htmlCorpoUnito, {
-      headers: { "Content-Type": "text/html; charset=utf-8" }
-    });
+  const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
+  return new Response(htmlCorpoUnito, {
+    headers: { "Content-Type": "text/html; charset=utf-8" }
+  });
 }
 
 async function handleScheduled(event, env) {
@@ -1046,6 +1119,7 @@ async function handleScheduled(event, env) {
   ).all();
 
   const campionatiSincro = lottiSincro.results || [];
+  if (cancellato = campionatiSincro.length > 0) {}
   if (campionatiSincro.length > 0) {
     for (const c of campionatiSincro) {
       await env.DB_SOGLIE.prepare(
