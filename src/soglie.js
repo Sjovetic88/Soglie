@@ -61,11 +61,21 @@ async function inizializzaSeNecessario(env, forzaReset) {
   const date = calcolaDateIntervallo();
   
   if (!forzaReset) {
-    const controllo = await env.DB_SOGLIE.prepare(
-      "SELECT COUNT(*) as totale FROM sync_stato_campionati WHERE data_fine = ?"
-    ).bind(date.dbOggi).first();
+    const recordUltimo = await env.DB_SOGLIE.prepare(
+      "SELECT ultimo_aggiornamento FROM sync_stato_campionati ORDER BY ultimo_aggiornamento ASC LIMIT 1"
+    ).first();
 
-    if (controllo && controllo.totale > 0) {
+    if (recordUltimo && recordUltimo.ultimo_aggiornamento) {
+      const oraUltimo = new Date(recordUltimo.ultimo_aggiornamento).getTime();
+      const oraOra = new Date().getTime();
+      const differenzaOre = (oraOra - oraUltimo) / (1000 * 60 * 60);
+
+      // Se l'ultimo aggiornamento completo è avvenuto meno di 6 ore fa, non resettiamo
+      if (differenzaOre < 6.0) {
+        return;
+      }
+    } else if (recordUltimo) {
+      // Se i record esistono ma ultimo_aggiornamento è NULL, la sincronizzazione iniziale è già in corso
       return;
     }
   }
@@ -83,8 +93,8 @@ async function inizializzaSeNecessario(env, forzaReset) {
     
     for (const riga of campionatiSorgente.results) {
       await env.DB_SOGLIE.prepare(
-        "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_semafori, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, 'PENDING', 'PENDING')"
-      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi, timestampOra).run();
+        "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_semafori, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, NULL, 'PENDING', 'PENDING')"
+      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi).run();
     }
   }
 }
@@ -391,68 +401,12 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
-  // API strategica per la validazione automatica del Worker del Weekend
-  if (url.pathname === "/api/ottieni-soglia") {
-    try {
-      const campionato = url.searchParams.get("campionato");
-      const esito = url.searchParams.get("esito");
-
-      if (!campionato || !esito) {
-        return new Response(JSON.stringify({
-          campionato: "",
-          esito: "",
-          semaforo: "ROSSO",
-          soglia_attiva: 100.0,
-          avviso: "Parametri di richiesta mancanti. Scommessa bloccata di sicurezza."
-        }), {
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-
-      const record = await env.DB_SOGLIE.prepare(
-        "SELECT semaforo, soglia_attiva FROM soglie_calcolate WHERE campionato = ? AND esito = ?"
-      ).bind(campionato, esito).first();
-
-      if (!record) {
-        return new Response(JSON.stringify({
-          campionato: campionato,
-          esito: esito,
-          semaforo: "ROSSO",
-          soglia_attiva: 100.0,
-          avviso: "Soglia non trovata nel database. Scommessa bloccata di sicurezza."
-        }), {
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-
-      return new Response(JSON.stringify({
-        campionato: campionato,
-        esito: esito,
-        semaforo: record.semaforo,
-        soglia_attiva: record.soglia_attiva
-      }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    } catch (err) {
-      return new Response(JSON.stringify({
-        campionato: url.searchParams.get("campionato") || "",
-        esito: url.searchParams.get("esito") || "",
-        semaforo: "ROSSO",
-        soglia_attiva: 100.0,
-        avviso: "Errore interno durante il recupero: " + err.message + ". Sicurezza applicata."
-      }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-  }
-
   const mappaBandiereDinamica = await ottieniMappaBandiereDinamica(env);
 
   if (url.pathname === "/api/stato") {
     try {
       const elenco = await env.DB_SOGLIE.prepare(
-        "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati, stato_semafori, stato_soglie FROM sync_stato_campionati ORDER BY campionato ASC"
+        "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati, stato_soglie FROM sync_stato_campionati ORDER BY campionato ASC"
       ).all();
 
       const campionatiConBandiere = (elenco.results || []).map(item => {
@@ -463,7 +417,6 @@ async function handleRequest(request, env) {
           data_fine: item.data_fine,
           stato: item.stato,
           match_elaborati: item.match_elaborati,
-          stato_semafori: item.stato_semafori || "PENDING",
           stato_soglie: item.stato_soglie || "PENDING",
           bandiera: mappaBandiereDinamica[item.campionato] || "🏳️"
         };
@@ -480,7 +433,6 @@ async function handleRequest(request, env) {
     }
   }
 
-  // API speciale per prelevare TUTTE le soglie calcolate e popolare la matrice globale
   if (url.pathname === "/api/semafori-tutti") {
     try {
       const semafori = await env.DB_SOGLIE.prepare(
@@ -1043,7 +995,7 @@ async function handleRequest(request, env) {
     "  }",
     "}",
     "async function confermaReset() {",
-    "  if (confirm('Sei sicuro di resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
+    "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
     "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
     "    try {",
     "      var res = await fetch('/api/reset', { method: 'POST' });",
@@ -1058,7 +1010,6 @@ async function handleRequest(request, env) {
     "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
     "        document.getElementById('stato-operazione').className = 'status-bg';",
     "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
-    "        document.getElementById('pannello-dettaglio-soglie').style.display = 'none';",
     "        await aggiornaStato();",
     "      }",
     "    } catch(e) {",
@@ -1090,35 +1041,35 @@ async function handleRequest(request, env) {
 async function handleScheduled(event, env) {
   await inizializzaSeNecessario(env, false);
 
-  const prossimoMatch = await env.DB_SOGLIE.prepare(
-    "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'PENDING' LIMIT 1"
-  ).first();
+  const lottiSincro = await env.DB_SOGLIE.prepare(
+    "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'PENDING' LIMIT 2"
+  ).all();
 
-  if (prossimoMatch) {
-    const nazione = prossimoMatch.nazione;
-    const campionato = prossimoMatch.campionato;
+  const campionatiSincro = lottiSincro.results || [];
+  if (campionatiSincro.length > 0) {
+    for (const c of campionatiSincro) {
+      await env.DB_SOGLIE.prepare(
+        "UPDATE sync_stato_campionati SET stato = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
+      ).bind(c.nazione, c.campionato).run();
 
-    await env.DB_SOGLIE.prepare(
-      "UPDATE sync_stato_campionati SET stato = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
-    ).bind(nazione, campionato).run();
-
-    await elaboraSincronizzazioneCampionato(env, nazione, campionato);
-    return;
+      await elaboraSincronizzazioneCampionato(env, c.nazione, c.campionato);
+    }
+    return; 
   }
 
-  const prossimoSemaforo = await env.DB_SOGLIE.prepare(
-    "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'COMPLETED' AND stato_soglie = 'PENDING' LIMIT 1"
-  ).first();
+  const lottiSoglie = await env.DB_SOGLIE.prepare(
+    "SELECT nazione, campionato FROM sync_stato_campionati WHERE stato = 'COMPLETED' AND stato_soglie = 'PENDING' LIMIT 2"
+  ).all();
 
-  if (prossimoSemaforo) {
-    const nazione = prossimoSemaforo.nazione;
-    const campionato = prossimoSemaforo.campionato;
+  const campionatiSoglie = lottiSoglie.results || [];
+  if (campionatiSoglie.length > 0) {
+    for (const c of campionatiSoglie) {
+      await env.DB_SOGLIE.prepare(
+        "UPDATE sync_stato_campionati SET stato_semafori = 'PROCESSING', stato_soglie = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
+      ).bind(c.nazione, c.campionato).run();
 
-    await env.DB_SOGLIE.prepare(
-      "UPDATE sync_stato_campionati SET stato_semafori = 'PROCESSING', stato_soglie = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
-    ).bind(nazione, campionato).run();
-
-    await elaboraSoglieCampionato(env, nazione, campionato);
+      await elaboraSoglieCampionato(env, c.nazione, c.campionato);
+    }
   }
 }
 
