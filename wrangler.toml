@@ -3,7 +3,7 @@ main = "src/soglie.js"
 compatibility_date = "2024-03-01"
 
 [triggers]
-crons = ["0 0 * * *"] # Esegue automaticamente ogni giorno a mezzanotte
+crons = ["* * * * *"] # Esegue automaticamente ogni giorno a mezzanotte
 
 [[d1_databases]]
 binding = "DB_PRONOSTICI"
