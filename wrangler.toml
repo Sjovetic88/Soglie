@@ -1,4 +1,4 @@
-name = "soglie"
+name = "soglia"
 main = "src/soglie.js"
 compatibility_date = "2024-03-01"
 
