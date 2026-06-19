@@ -61,19 +61,11 @@ async function inizializzaSeNecessario(env, forzaReset) {
   const date = calcolaDateIntervallo();
   
   if (!forzaReset) {
-    const recordUltimo = await env.DB_SOGLIE.prepare(
-      "SELECT ultimo_aggiornamento FROM sync_stato_campionati ORDER BY ultimo_aggiornamento ASC LIMIT 1"
-    ).first();
+    const controllo = await env.DB_SOGLIE.prepare(
+      "SELECT COUNT(*) as totale FROM sync_stato_campionati WHERE data_fine = ?"
+    ).bind(date.dbOggi).first();
 
-    if (recordUltimo && recordUltimo.ultimo_aggiornamento) {
-      const oraUltimo = new Date(recordUltimo.ultimo_aggiornamento).getTime();
-      const oraOra = new Date().getTime();
-      const differenzaOre = (oraOra - oraUltimo) / (1000 * 60 * 60);
-
-      if (differenzaOre < 6.0) {
-        return;
-      }
-    } else if (recordUltimo) {
+    if (controllo && controllo.totale > 0) {
       return;
     }
   }
@@ -91,8 +83,8 @@ async function inizializzaSeNecessario(env, forzaReset) {
     
     for (const riga of campionatiSorgente.results) {
       await env.DB_SOGLIE.prepare(
-        "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_semafori, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, NULL, 'PENDING', 'PENDING')"
-      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi).run();
+        "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_semafori, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, 'PENDING', 'PENDING')"
+      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi, timestampOra).run();
     }
   }
 }
@@ -399,6 +391,25 @@ async function handleRequest(request, env) {
     console.error("Errore inizializzazione automatica: " + err.message);
   }
 
+  // API speciale di aggancio per bypassare i Cron di Cloudflare tramite Cron-Job.org (Sicurezza attiva)
+  if (url.pathname === "/api/cron-background") {
+    try {
+      const key = url.searchParams.get("key");
+      if (key !== "sogliesecret123") {
+        return new Response("Non autorizzato", { status: 403 });
+      }
+      await handleScheduled(null, env);
+      return new Response("OK - Cron background eseguito", {
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
+      });
+    } catch (err) {
+      return new Response("Errore: " + err.message, {
+        status: 500,
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
+      });
+    }
+  }
+
   // API strategica per la validazione automatica del Worker del Weekend
   if (url.pathname === "/api/ottieni-soglia") {
     try {
@@ -451,25 +462,6 @@ async function handleRequest(request, env) {
       }), {
         status: 500,
         headers: { "Content-Type": "application/json" }
-      });
-    }
-  }
-
-  // API speciale di aggancio per bypassare i Cron di Cloudflare tramite Cron-Job.org (Sicurezza attiva)
-  if (url.pathname === "/api/cron-background") {
-    const key = url.searchParams.get("key");
-    if (key !== "sogliesecret123") {
-      return new Response("Non autorizzato", { status: 403 });
-    }
-    try {
-      await handleScheduled(null, env);
-      return new Response("OK - Cron eseguito con successo in background", {
-        headers: { "Content-Type": "text/plain; charset=utf-8" }
-      });
-    } catch (err) {
-      return new Response("Errore di background: " + err.message, {
-        status: 500,
-        headers: { "Content-Type": "text/plain; charset=utf-8" }
       });
     }
   }
@@ -649,6 +641,7 @@ async function handleRequest(request, env) {
     ".progress-bar { background-color: #00e5ff; height: 100%; width: 0%; transition: width 0.4s ease; }",
     ".riga-card { background-color: #0c0c0c; border: 1px solid #1a1a1a; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; display: grid; grid-template-columns: 120px 100px 1fr; align-items: center; cursor: pointer; transition: background-color 0.15s, border-color 0.15s; }",
     ".riga-card:hover { background-color: #121212; border-color: #2a2a2a; }",
+    ".riga-card .info-sinistra { display: flex; flex-direction: column; gap: 4px; }",
     ".riga-card .nome-campionato { font-size: 15px; font-weight: bold; color: #ffffff; display: flex; align-items: center; gap: 8px; }",
     ".riga-card .valore-centrale { display: flex; justify-content: center; gap: 8px; }",
     ".riga-card .valore-destra { text-align: right; font-size: 12px; color: #666666; font-weight: bold; }",
@@ -1059,56 +1052,57 @@ async function handleRequest(request, env) {
     "    });",
     "    if (res.ok) {",
     "      var ris = await res.json();",
-    "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti con auto-calibrazione attiva.', 'success');",
-    "    }",
-    "  } catch(e) {",
-    "    scriviLog('Errore calcolo: ' + e.message, 'error');",
-    "  } finally {",
-    "    elaborazioneInCorso = false;",
-    "    await aggiornaStato();",
-    "  }",
-    "}",
-    "async function confermaReset() {",
-    "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
-    "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
-    "    try {",
-    "      var res = await fetch('/api/reset', { method: 'POST' });",
-    "      if (res.ok) {",
-    "        scriviLog('Database ripulito e resettato con successo.', 'success');",
-    "        nitroAttiva = false;",
-    "        calcoloSoglieAttivo = false;",
-    "        var btnStart = document.getElementById('btn-start');",
-    "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
-    "        btnStart.className = 'btn btn-primary';",
-    "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
-    "        document.getElementById('stato-operazione').className = 'status-bg';",
-    "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
-    "        await aggiornaStato();",
-    "      }",
-    "    } catch(e) {",
-    "      scriviLog('Errore reset: ' + e.message, 'error');",
-    "    }",
-    "  }",
-    "}",
-    "document.addEventListener('visibilitychange', function() {",
-    "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
-    "    nitroAttiva = false;",
-    "    calcoloSoglieAttivo = false;",
-    "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
-    "    document.getElementById('stato-operazione').className = 'status-bg';",
-    "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
-    "  }",
-    "});",
-    "aggiornaStato();",
-    "</script>",
-    "</body>",
-    "</html>"
-  ];
+      "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti con auto-calibrazione attiva.', 'success');",
+      "    }",
+      "  } catch(e) {",
+      "    scriviLog('Errore calcolo: ' + e.message, 'error');",
+      "  } finally {",
+      "    elaborazioneInCorso = false;",
+      "    await aggiornaStato();",
+      "  }",
+      "}",
+      "async function confermaReset() {",
+      "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
+      "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
+      "    try {",
+      "      var res = await fetch('/api/reset', { method: 'POST' });",
+      "      if (res.ok) {",
+      "        scriviLog('Database ripulito e resettato con successo.', 'success');",
+      "        nitroAttiva = false;",
+      "        calcoloSoglieAttivo = false;",
+      "        var btnStart = document.getElementById('btn-start');",
+      "        btnStart.style.display = 'inline-block';",
+      "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
+      "        btnStart.className = 'btn btn-primary';",
+      "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
+      "        document.getElementById('stato-operazione').className = 'status-bg';",
+      "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
+      "        await aggiornaStato();",
+      "      }",
+      "    } catch(e) {",
+      "      scriviLog('Errore reset: ' + e.message, 'error');",
+      "    }",
+      "  }",
+      "}",
+      "document.addEventListener('visibilitychange', function() {",
+      "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
+      "    nitroAttiva = false;",
+      "    calcoloSoglieAttivo = false;",
+      "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
+      "    document.getElementById('stato-operazione').className = 'status-bg';",
+      "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
+      "  }",
+      "});",
+      "aggiornaStato();",
+      "</script>",
+      "</body>",
+      "</html>"
+    ];
 
-  const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
-  return new Response(htmlCorpoUnito, {
-    headers: { "Content-Type": "text/html; charset=utf-8" }
-  });
+    const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
+    return new Response(htmlCorpoUnito, {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    });
 }
 
 async function handleScheduled(event, env) {
@@ -1119,7 +1113,6 @@ async function handleScheduled(event, env) {
   ).all();
 
   const campionatiSincro = lottiSincro.results || [];
-  if (cancellato = campionatiSincro.length > 0) {}
   if (campionatiSincro.length > 0) {
     for (const c of campionatiSincro) {
       await env.DB_SOGLIE.prepare(
@@ -1142,7 +1135,7 @@ async function handleScheduled(event, env) {
         "UPDATE sync_stato_campionati SET stato_semafori = 'PROCESSING', stato_soglie = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
       ).bind(c.nazione, c.campionato).run();
 
-      await elaboraSoglieCampionato(env, c.nazione, c.campionato);
+      await elaboraSoglieCampionato(env, nazione, c.campionato);
     }
   }
 }
