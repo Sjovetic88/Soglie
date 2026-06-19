@@ -75,7 +75,7 @@ async function inizializzaSeNecessario(env, forzaReset) {
         return;
       }
     } else if (recordUltimo) {
-      // Se i record esistono ma ultimo_aggiornamento è NULL, la sincronizzazione iniziale è già in corso
+      // Se la tabella non è vuota ma l'ultimo aggiornamento è nullo, significa che la prima sincronizzazione è in corso
       return;
     }
   }
@@ -406,7 +406,7 @@ async function handleRequest(request, env) {
   if (url.pathname === "/api/stato") {
     try {
       const elenco = await env.DB_SOGLIE.prepare(
-        "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati, stato_soglie FROM sync_stato_campionati ORDER BY campionato ASC"
+        "SELECT nazione, campionato, data_inizio, data_fine, stato, match_elaborati, stato_semafori, stato_soglie FROM sync_stato_campionati ORDER BY campionato ASC"
       ).all();
 
       const campionatiConBandiere = (elenco.results || []).map(item => {
@@ -417,6 +417,7 @@ async function handleRequest(request, env) {
           data_fine: item.data_fine,
           stato: item.stato,
           match_elaborati: item.match_elaborati,
+          stato_semafori: item.stato_semafori || "PENDING",
           stato_soglie: item.stato_soglie || "PENDING",
           bandiera: mappaBandiereDinamica[item.campionato] || "🏳️"
         };
@@ -998,44 +999,43 @@ async function handleRequest(request, env) {
     "  if (confirm('Sei sicuro di voler resettare? Tutte le partite salvate e lo stato verranno azzerati.')) {",
     "    scriviLog('Richiesta di svuotamento e ripristino database inviata...', 'info');",
     "    try {",
-    "      var res = await fetch('/api/reset', { method: 'POST' });",
-    "      if (res.ok) {",
-    "        scriviLog('Database ripulito e resettato con successo.', 'success');",
-    "        nitroAttiva = false;",
-    "        calcoloSoglieAttivo = false;",
-    "        var btnStart = document.getElementById('btn-start');",
-    "        btnStart.style.display = 'inline-block';",
-    "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
-    "        btnStart.className = 'btn btn-primary';",
-    "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
-    "        document.getElementById('stato-operazione').className = 'status-bg';",
-    "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
-    "        await aggiornaStato();",
-    "      }",
-    "    } catch(e) {",
-    "      scriviLog('Errore reset: ' + e.message, 'error');",
-    "    }",
-    "  }",
-    "}",
-    "document.addEventListener('visibilitychange', function() {",
-    "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
-    "    nitroAttiva = false;",
-    "    calcoloSoglieAttivo = false;",
-    "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
-    "    document.getElementById('stato-operazione').className = 'status-bg';",
-    "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
-    "  }",
-    "});",
-    "aggiornaStato();",
-    "</script>",
-    "</body>",
-    "</html>"
-  ];
+      "      var res = await fetch('/api/reset', { method: 'POST' });",
+      "      if (res.ok) {",
+      "        scriviLog('Database ripulito e resettato con successo.', 'success');",
+      "        nitroAttiva = false;",
+      "        calcoloSoglieAttivo = false;",
+      "        var btnStart = document.getElementById('btn-start');",
+      "        btnStart.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
+      "        btnStart.className = 'btn btn-primary';",
+      "        document.getElementById('stato-operazione').textContent = 'In attesa di avvio manuale';",
+      "        document.getElementById('stato-operazione').className = 'status-bg';",
+      "        document.getElementById('pannello-dettaglio-match').style.display = 'none';",
+      "        await aggiornaStato();",
+      "      }",
+      "    } catch(e) {",
+      "      scriviLog('Errore reset: ' + e.message, 'error');",
+      "    }",
+      "  }",
+      "}",
+      "document.addEventListener('visibilitychange', function() {",
+      "  if (document.hidden && (nitroAttiva || calcoloSoglieAttivo)) {",
+      "    nitroAttiva = false;",
+      "    calcoloSoglieAttivo = false;",
+      "    document.getElementById('stato-operazione').textContent = 'Sincronizzazione in Background...';",
+      "    document.getElementById('stato-operazione').className = 'status-bg';",
+      "    scriviLog('Interfaccia inattiva. Il controllo della copia passa al Background Server.', 'info');",
+      "  }",
+      "});",
+      "aggiornaStato();",
+      "</script>",
+      "</body>",
+      "</html>"
+    ];
 
-  const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
-  return new Response(htmlCorpoUnito, {
-    headers: { "Content-Type": "text/html; charset=utf-8" }
-  });
+    const htmlCorpoUnito = htmlComponenti.join(String.fromCharCode(10));
+    return new Response(htmlCorpoUnito, {
+      headers: { "Content-Type": "text/html; charset=utf-8" }
+    });
 }
 
 async function handleScheduled(event, env) {
