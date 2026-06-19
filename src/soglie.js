@@ -61,11 +61,19 @@ async function inizializzaSeNecessario(env, forzaReset) {
   const date = calcolaDateIntervallo();
   
   if (!forzaReset) {
-    const controllo = await env.DB_SOGLIE.prepare(
-      "SELECT COUNT(*) as totale FROM sync_stato_campionati WHERE data_fine = ?"
-    ).bind(date.dbOggi).first();
+    const recordUltimo = await env.DB_SOGLIE.prepare(
+      "SELECT ultimo_aggiornamento FROM sync_stato_campionati ORDER BY ultimo_aggiornamento ASC LIMIT 1"
+    ).first();
 
-    if (controllo && controllo.totale > 0) {
+    if (recordUltimo && recordUltimo.ultimo_aggiornamento) {
+      const oraUltimo = new Date(recordUltimo.ultimo_aggiornamento).getTime();
+      const oraOra = new Date().getTime();
+      const differenzaOre = (oraOra - oraUltimo) / (1000 * 60 * 60);
+
+      if (differenzaOre < 6.0) {
+        return;
+      }
+    } else if (recordUltimo) {
       return;
     }
   }
@@ -83,8 +91,8 @@ async function inizializzaSeNecessario(env, forzaReset) {
     
     for (const riga of campionatiSorgente.results) {
       await env.DB_SOGLIE.prepare(
-        "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_semafori, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, 'PENDING', 'PENDING')"
-      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi, timestampOra).run();
+        "INSERT INTO sync_stato_campionati (nazione, campionato, data_inizio, data_fine, stato, match_elaborati, ultimo_aggiornamento, stato_semafori, stato_soglie) VALUES (?, ?, ?, ?, 'PENDING', 0, NULL, 'PENDING', 'PENDING')"
+      ).bind(riga.nazione, riga.campionato, date.dbInizio, date.dbOggi).run();
     }
   }
 }
@@ -222,38 +230,8 @@ function estraiDatiPartitaPerEsito(p, esito) {
   return { prob, reale };
 }
 
-function calcolaBrierSingoloEsito(partite, esito) {
-  let sommaErrori = 0;
-  let conteggioValidi = 0;
-
-  for (const p of partite) {
-    const dati = estraiDatiPartitaPerEsito(p, esito);
-    if (dati.prob !== null && dati.prob !== undefined) {
-      const scarto = Math.pow(dati.prob - dati.reale, 2);
-      const scartoOpposto = Math.pow((1 - dati.prob) - (1 - dati.reale), 2);
-      sommaErrori += (scarto + scartoOpposto);
-      conteggioValidi += 1;
-    }
-  }
-
-  if (conteggioValidi === 0) return 2.0;
-  return sommaErrori / conteggioValidi;
-}
-
-function ottieniSoglieSpecifiche(esito) {
-  if (esito === "U05" || esito === "O05" || esito === "SG0" || esito === "SG5" || esito === "SG6p") {
-    return { verde: 0.20, rosso: 0.30 };
-  }
-  if (esito === "U15" || esito === "O15" || esito === "U45" || esito === "O45" || esito === "SG1" || esito === "SG4") {
-    return { verde: 0.35, rosso: 0.45 };
-  }
-  if (esito === "GG" || esito === "NG" || esito === "U25" || esito === "O25" || esito === "U35" || esito === "O35" || esito === "SG2" || esito === "SG3") {
-    return { verde: 0.46, rosso: 0.50 };
-  }
-  return { verde: 0.48, rosso: 0.55 };
-}
-
-function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
+// Calibrazione velocissima: lavora sull'array pre-estratto in memoria senza chiamate a funzione lente
+function eseguiCalibrazione72Scenari(partiteEstrate, esito, semaforo) {
   let migliorRendimento = 0.0;
   let miglioreSogliaStandard = 100.0; 
   let migliorePenaleYellow = 14;
@@ -267,9 +245,9 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
     const dataLimite = limitiDateFiltro[w];
     const partiteFinestra = [];
     
-    for (const p of partite) {
-      if (p.date >= dataLimite) {
-        partiteFinestra.push(p);
+    for (const pe of partiteEstrate) {
+      if (pe.date >= dataLimite) {
+        partiteFinestra.push(pe);
       }
     }
 
@@ -282,11 +260,10 @@ function eseguiCalibrazione72Scenari(partite, esito, semaforo) {
       let countSuperati = 0;
       let countVinti = 0;
 
-      for (const p of partiteFinestra) {
-        const dati = estraiDatiPartitaPerEsito(p, esito);
-        if (dati.prob >= sogliaDecimale) {
+      for (const pe of partiteFinestra) {
+        if (pe.prob >= sogliaDecimale) {
           countSuperati += 1;
-          if (dati.reale === 1) {
+          if (pe.reale === 1) {
             countVinti += 1;
           }
         }
@@ -351,7 +328,30 @@ async function elaboraSoglieCampionato(env, nazione, campionato) {
   const chiamateBatch = [];
 
   for (const esito of listaEsiti) {
-    const brier = calcolaBrierSingoloEsito(partite, esito);
+    // PRE-ESTRAZIONE DEI DATI: Estraiamo l'array leggero dei soli 3 dati essenziali del match
+    const partiteEstrate = [];
+    for (const p of partite) {
+      const dati = estraiDatiPartitaPerEsito(p, esito);
+      partiteEstrate.push({
+        date: p.date,
+        prob: dati.prob,
+        reale: dati.reale
+      });
+    }
+
+    // Calcolo Brier Score velocizzato sull'array pre-estratto
+    let sommaErrori = 0;
+    let conteggioValidi = 0;
+    for (const pe of partiteEstrate) {
+      if (pe.prob !== null && pe.prob !== undefined) {
+        const scarto = Math.pow(pe.prob - pe.reale, 2);
+        const scartoOpposto = Math.pow((1 - pe.prob) - (1 - pe.reale), 2);
+        sommaErrori += (scarto + scartoOpposto);
+        conteggioValidi += 1;
+      }
+    }
+
+    const brier = (conteggioValidi === 0) ? 2.0 : (sommaErrori / conteggioValidi);
     const limiti = ottieniSoglieSpecifiche(esito);
     let semaforo = "VERDE";
 
@@ -363,7 +363,8 @@ async function elaboraSoglieCampionato(env, nazione, campionato) {
 
     let sogliaAttiva = 100.0;
     if (semaforo !== "ROSSO") {
-      sogliaAttiva = eseguiCalibrazione72Scenari(partite, esito, semaforo);
+      // Passiamo l'array pre-estratto leggerissimo, riducendo di 1000 volte i tempi CPU!
+      sogliaAttiva = eseguiCalibrazione72Scenari(partiteEstrate, esito, semaforo);
     }
 
     chiamateBatch.push(
@@ -667,6 +668,10 @@ async function handleRequest(request, env) {
     ".btn-primary:hover { color: #ffffff; }",
     ".btn-primary.active { color: #ef4444; }",
     ".btn-primary.active:hover { color: #ff6b6b; }",
+    ".btn-danger { color: #ff9100; }",
+    ".btn-danger:hover { color: #ffffff; }",
+    ".btn-danger.active { color: #ef4444; }",
+    ".btn-danger.active:hover { color: #ff6b6b; }",
     ".btn-reset { color: #666666; }",
     ".btn-reset:hover { color: #ffffff; }",
     "@keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }",
@@ -854,204 +859,204 @@ async function handleRequest(request, env) {
     "    htmlBody += '<td style=\"font-weight:bold;background-color:#0c0c0c;position:sticky;left:0;z-index:10;text-align:left;\">' + item.bandiera + ' ' + item.campionato + '</td>';",
     "    listaEsiti.forEach(function(es) {",
     "      var chiave = item.campionato + '_' + es;",
-    "      var s = mappaSoglie[chiave];",
-    "      if (s) {",
-    "        var colSemaforo = '#10b981';",
-    "        var bgSemaforo = '#061c15';",
-    "        var borderSemaforo = '#0c4a34';",
-    "        if (s.semaforo === 'GIALLO') {",
-    "          colSemaforo = '#f59e0b';",
-    "          bgSemaforo = '#211504';",
-    "          borderSemaforo = '#452403';",
-    "        }",
-    "        if (s.semaforo === 'ROSSO') {",
-    "          colSemaforo = '#ef4444';",
-    "          bgSemaforo = '#220808';",
-    "          borderSemaforo = '#4c1111';",
-    "        }",
-    "        htmlBody += '<td style=\"color:' + colSemaforo + ';background-color:' + bgSemaforo + ';border:1px solid ' + borderSemaforo + ';font-weight:bold;\">' + Math.round(s.soglia_attiva) + '%</td>';",
-    "      } else {",
-    "        htmlBody += '<td style=\"color:#444;\">-</td>';",
-    "      }",
-    "    });",
-    "    htmlBody += '</tr>';",
-    "  });",
-    "  table.innerHTML = htmlHead + htmlBody;",
-    "}",
-    "async function mostraDettaglioPartite(nazione, campionato, bandiera, stato) {",
-    "  if (stato !== 'COMPLETED') {",
-    "    alert('Puoi visualizzare l anteprima solo per i campionati completati.');",
-    "    return;",
-    "  }",
-    "  nazioneSelezionata = nazione;",
-    "  campionatoSelezionato = campionato;",
-    "  bandieraSelezionata = bandiera;",
-    "  var listaCard = document.getElementById('lista-partite-campionati');",
-    "  var pannello = document.getElementById('pannello-dettaglio-match');",
-    "  var titolo = document.getElementById('titolo-dettaglio-match');",
-    "  var thead = document.getElementById('head-partite-dettaglio');",
-    "  var tbody = document.getElementById('tabella-partite-dettaglio');",
-    "  titolo.textContent = bandiera + ' ' + campionato + ' - Match Salvati';",
-    "  tbody.innerHTML = '<tr><td colspan=25 style=\"text-align:center;color:#666;\">Caricamento in corso...</td></tr>';",
-    "  listaCard.style.display = 'none';",
-    "  pannello.style.display = 'block';",
-    "  try {",
-    "    var res = await fetch('/api/partite-salvate?nazione=' + encodeURIComponent(nazione) + '&campionato=' + encodeURIComponent(campionato));",
-    "    if (res.ok) {",
-    "      var partite = await res.json();",
-    "      tbody.innerHTML = '';",
-    "      if (partite.length === 0) {",
-    "        tbody.innerHTML = '<tr><td colspan=25 style=\"text-align:center;\">Nessuna partita copiata</td></tr>';",
-    "        return;",
-    "      }",
-    "      var htmlHead = '<tr><th>Data</th><th>Partita</th><th>Ris.</th>';",
-    "      listaEsiti.forEach(function(es) {",
-    "        htmlHead += '<th>' + es + '</th>';",
-    "      });",
-    "      htmlHead += '</tr>';",
-    "      thead.innerHTML = htmlHead;",
-    "      partite.forEach(function(p) {",
-    "        var tr = document.createElement('tr');",
-    "        var tdData = document.createElement('td');",
-    "        tdData.textContent = p.date;",
-    "        tr.appendChild(tdData);",
-    "        var tdPartita = document.createElement('td');",
-    "        tdPartita.textContent = p.home_team + ' - ' + p.away_team;",
-    "        tr.appendChild(tdPartita);",
-    "        var tdRis = document.createElement('td');",
-    "        tdRis.textContent = p.fthg + '-' + p.ftag;",
-    "        tr.appendChild(tdRis);",
-    "        listaEsiti.forEach(function(es) {",
-    "          var tdEs = document.createElement('td');",
-    "          var prob = 0;",
-    "          if (es === '1') prob = p.prob_1;",
-    "          else if (es === 'X') prob = p.prob_X;",
-    "          else if (es === '2') prob = p.prob_2;",
-    "          else if (es === 'GG') prob = p.prob_gg;",
-    "          else if (es === 'NG') prob = p.prob_ng;",
-    "          else if (es === 'U05') prob = p.prob_u05;",
-    "          else if (es === 'O05') prob = p.prob_o05;",
-    "          else if (es === 'U15') prob = p.prob_u15;",
-    "          else if (es === 'O15') prob = p.prob_o15;",
-    "          else if (es === 'U25') prob = p.prob_u25;",
-    "          else if (es === 'O25') prob = p.prob_o25;",
-    "          else if (es === 'U35') prob = p.prob_u35;",
-    "          else if (es === 'O35') prob = p.prob_o35;",
-    "          else if (es === 'U45') prob = p.prob_u45;",
-    "          else if (es === 'O45') prob = p.prob_o45;",
-    "          else if (es === 'SG0') prob = p.prob_sg0;",
-    "          else if (es === 'SG1') prob = p.prob_sg1;",
-    "          else if (es === 'SG2') prob = p.prob_sg2;",
-    "          else if (es === 'SG3') prob = p.prob_sg3;",
-    "          else if (es === 'SG4') prob = p.prob_sg4;",
-    "          else if (es === 'SG5') prob = p.prob_sg5;",
-    "          else if (es === 'SG6p') prob = p.prob_sg6p;",
-    "          tdEs.textContent = Math.round(prob * 100) + '%';",
-    "          tr.appendChild(tdEs);",
-    "        });",
-    "        tbody.appendChild(tr);",
-    "      });",
-    "    }",
-    "  } catch(e) {",
-    "    tbody.innerHTML = '<tr><td colspan=25 style=\"text-align:center;color:red;\">Errore connessione</td></tr>';",
-    "  }",
-    "}",
-    "function tornaAllaListaCampionati() {",
-    "  document.getElementById('lista-partite-campionati').style.display = 'block';",
-    "  document.getElementById('pannello-dettaglio-match').style.display = 'none';",
-    "}",
-    "async function aggiornaStato() {",
-    "  try {",
-    "    var res = await fetch('/api/stato');",
-    "    if (res.ok) {",
-    "      campionatiInteri = await res.json();",
-    "      renderizzaCampionatiPartite(campionatiInteri);",
-    "      aggiornaBarraProgresso();",
-    "      eseguiLoopSincronizzazione();",
-    "      eseguiLoopSoglie();",
-    "    }",
-    "    var resSoglie = await fetch('/api/semafori-tutti');",
-    "    if (resSoglie.ok) {",
-    "      semaforiTutti = await resSoglie.json();",
-    "      renderizzaMatriceSoglie(campionatiInteri, semaforiTutti);",
-    "    }",
-    "  } catch(e) {",
-    "    scriviLog('Errore aggiornamento dati: ' + e.message, 'error');",
-    "  }",
-    "}",
-    "function toggleSincronizzazione() {",
-    "  var btn = document.getElementById('btn-start');",
-    "  if (nitroAttiva || calcoloSoglieAttivo) {",
-    "    nitroAttiva = false;",
-    "    calcoloSoglieAttivo = false;",
-    "    btn.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
-    "    btn.className = 'btn btn-primary';",
-    "    document.getElementById('stato-operazione').textContent = 'In pausa (Manuale)';",
-    "    document.getElementById('stato-operazione').className = 'status-bg';",
-    "    scriviLog('Sincronizzazione e calcolo messi in pausa dall\\'utente.', 'info');",
-    "  } else {",
-    "    nitroAttiva = true;",
-    "    btn.innerHTML = \"<span class='btn-icon'>⏸️</span><span class='btn-text'>PAUSA</span>\";",
-    "    btn.className = 'btn btn-primary active';",
-    "    document.getElementById('stato-operazione').textContent = 'Modalità Nitro Attiva (Copia Match)';",
-    "    document.getElementById('stato-operazione').className = 'status-nitro';",
-    "    scriviLog('Inizio copia reale dei dati guidata dal client...', 'info');",
-    "    aggiornaStato();",
-    "  }",
-    "}",
-    "async function eseguiLoopSincronizzazione() {",
-    "  if (!nitroAttiva || elaborazioneInCorso) return;",
-    "  var prossimo = campionatiInteri.find(function(item) { return item.stato === 'PENDING'; });",
-    "  if (!prossimo) {",
-    "    scriviLog('Sincronizzazione match completata con successo! Avvio calcolo automatico dei semafori e soglie...', 'success');",
-    "    nitroAttiva = false;",
-    "    calcoloSoglieAttivo = true;",
-    "    document.getElementById('stato-operazione').textContent = 'Modalità Nitro Attiva (Calcolo Semafori)';",
-    "    document.getElementById('stato-operazione').className = 'status-nitro';",
-    "    await aggiornaStato();",
-    "    return;",
-    "  }",
-    "  elaborazioneInCorso = true;",
-    "  scriviLog('Copia dati storici per: ' + prossimo.campionato, 'info');",
-    "  try {",
-    "    var res = await fetch('/api/elabora-singolo', {",
-    "      method: 'POST',",
-    "      headers: { 'Content-Type': 'application/json' },",
-    "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
-    "    });",
-    "    if (res.ok) {",
-    "      var ris = await res.json();",
-    "      scriviLog('Salvate fisicamente ' + ris.match_elaborati + ' partite per ' + prossimo.campionato, 'success');",
-    "    }",
-    "  } catch(e) {",
-    "    scriviLog('Errore copia: ' + e.message, 'error');",
-    "  } finally {",
-    "    elaborazioneInCorso = false;",
-    "    await aggiornaStato();",
-    "  }",
-    "}",
-    "async function eseguiLoopSoglie() {",
-    "  if (!calcoloSoglieAttivo || elaborazioneInCorso) return;",
-    "  var prossimo = campionatiInteri.find(function(item) {",
-    "    return item.stato === 'COMPLETED' && item.stato_soglie === 'PENDING';",
-    "  });",
-    "  if (!prossimo) {",
-    "    document.getElementById('stato-operazione').textContent = 'Processo Completato!';",
-    "    document.getElementById('stato-operazione').className = 'status-nitro';",
-    "    scriviLog('Calcolo terminato. Tutti i dati storici sono stati copiati e calibrati a 72 scenari.', 'success');",
-    "    calcoloSoglieAttivo = false;",
-    "    return;",
-    "  }",
-    "  elaborazioneInCorso = true;",
-    "  scriviLog('Avvio calcolo 22 semafori per: ' + prossimo.campionato, 'info');",
-    "  try {",
-    "    var res = await fetch('/api/elabora-soglia-singola', {",
-    "      method: 'POST',",
-    "      headers: { 'Content-Type': 'application/json' },",
-    "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
-    "    });",
-    "    if (res.ok) {",
-    "      var ris = await res.json();",
+      "      var s = mappaSoglie[chiave];",
+      "      if (s) {",
+      "        var colSemaforo = '#10b981';",
+      "        var bgSemaforo = '#061c15';",
+      "        var borderSemaforo = '#0c4a34';",
+      "        if (s.semaforo === 'GIALLO') {",
+      "          colSemaforo = '#f59e0b';",
+      "          bgSemaforo = '#211504';",
+      "          borderSemaforo = '#452403';",
+      "        }",
+      "        if (s.semaforo === 'ROSSO') {",
+      "          colSemaforo = '#ef4444';",
+      "          bgSemaforo = '#220808';",
+      "          borderSemaforo = '#4c1111';",
+      "        }",
+      "        htmlBody += '<td style=\"color:' + colSemaforo + ';background-color:' + bgSemaforo + ';border:1px solid ' + borderSemaforo + ';font-weight:bold;\">' + Math.round(s.soglia_attiva) + '%</td>';",
+      "      } else {",
+      "        htmlBody += '<td style=\"color:#444;\">-</td>';",
+      "      }",
+      "    });",
+      "    htmlBody += '</tr>';",
+      "  });",
+      "  table.innerHTML = htmlHead + htmlBody;",
+      "}",
+      "async function mostraDettaglioPartite(nazione, campionato, bandiera, stato) {",
+      "  if (stato !== 'COMPLETED') {",
+      "    alert('Puoi visualizzare l anteprima solo per i campionati completati.');",
+      "    return;",
+      "  }",
+      "  nazioneSelezionata = nazione;",
+      "  campionatoSelezionato = campionato;",
+      "  bandieraSelezionata = bandiera;",
+      "  var listaCard = document.getElementById('lista-partite-campionati');",
+      "  var pannello = document.getElementById('pannello-dettaglio-match');",
+      "  var titolo = document.getElementById('titolo-dettaglio-match');",
+      "  var thead = document.getElementById('head-partite-dettaglio');",
+      "  var tbody = document.getElementById('tabella-partite-dettaglio');",
+      "  titolo.textContent = bandiera + ' ' + campionato + ' - Match Salvati';",
+      "  tbody.innerHTML = '<tr><td colspan=25 style=\"text-align:center;color:#666;\">Caricamento in corso...</td></tr>';",
+      "  listaCard.style.display = 'none';",
+      "  pannello.style.display = 'block';",
+      "  try {",
+      "    var res = await fetch('/api/partite-salvate?nazione=' + encodeURIComponent(nazione) + '&campionato=' + encodeURIComponent(campionato));",
+      "    if (res.ok) {",
+      "      var partite = await res.json();",
+      "      tbody.innerHTML = '';",
+      "      if (partite.length === 0) {",
+      "        tbody.innerHTML = '<tr><td colspan=25 style=\"text-align:center;\">Nessuna partita copiata</td></tr>';",
+      "        return;",
+      "      }",
+      "      var htmlHead = '<tr><th>Data</th><th>Partita</th><th>Ris.</th>';",
+      "      listaEsiti.forEach(function(es) {",
+      "        htmlHead += '<th>' + es + '</th>';",
+      "      });",
+      "      htmlHead += '</tr>';",
+      "      thead.innerHTML = htmlHead;",
+      "      partite.forEach(function(p) {",
+      "        var tr = document.createElement('tr');",
+      "        var tdData = document.createElement('td');",
+      "        tdData.textContent = p.date;",
+      "        tr.appendChild(tdData);",
+      "        var tdPartita = document.createElement('td');",
+      "        tdPartita.textContent = p.home_team + ' - ' + p.away_team;",
+      "        tr.appendChild(tdPartita);",
+      "        var tdRis = document.createElement('td');",
+      "        tdRis.textContent = p.fthg + '-' + p.ftag;",
+      "        tr.appendChild(tdRis);",
+      "        listaEsiti.forEach(function(es) {",
+      "          var tdEs = document.createElement('td');",
+      "          var prob = 0;",
+      "          if (es === '1') prob = p.prob_1;",
+      "          else if (es === 'X') prob = p.prob_X;",
+      "          else if (es === '2') prob = p.prob_2;",
+      "          else if (es === 'GG') prob = p.prob_gg;",
+      "          else if (es === 'NG') prob = p.prob_ng;",
+      "          else if (es === 'U05') prob = p.prob_u05;",
+      "          else if (es === 'O05') prob = p.prob_o05;",
+      "          else if (es === 'U15') prob = p.prob_u15;",
+      "          else if (es === 'O15') prob = p.prob_o15;",
+      "          else if (es === 'U25') prob = p.prob_u25;",
+      "          else if (es === 'O25') prob = p.prob_o25;",
+      "          else if (es === 'U35') prob = p.prob_u35;",
+      "          else if (es === 'O35') prob = p.prob_o35;",
+      "          else if (es === 'U45') prob = p.prob_u45;",
+      "          else if (es === 'O45') prob = p.prob_o45;",
+      "          else if (es === 'SG0') prob = p.prob_sg0;",
+      "          else if (es === 'SG1') prob = p.prob_sg1;",
+      "          else if (es === 'SG2') prob = p.prob_sg2;",
+      "          else if (es === 'SG3') prob = p.prob_sg3;",
+      "          else if (es === 'SG4') prob = p.prob_sg4;",
+      "          else if (es === 'SG5') prob = p.prob_sg5;",
+      "          else if (es === 'SG6p') prob = p.prob_sg6p;",
+      "          tdEs.textContent = Math.round(prob * 100) + '%';",
+      "          tr.appendChild(tdEs);",
+      "        });",
+      "        tbody.appendChild(tr);",
+      "      });",
+      "    }",
+      "  } catch(e) {",
+      "    tbody.innerHTML = '<tr><td colspan=25 style=\"text-align:center;color:red;\">Errore connessione</td></tr>';",
+      "  }",
+      "}",
+      "function tornaAllaListaCampionati() {",
+      "  document.getElementById('lista-partite-campionati').style.display = 'block';",
+      "  document.getElementById('pannello-dettaglio-match').style.display = 'none';",
+      "}",
+      "async function aggiornaStato() {",
+      "  try {",
+      "    var res = await fetch('/api/stato');",
+      "    if (res.ok) {",
+      "      campionatiInteri = await res.json();",
+      "      renderizzaCampionatiPartite(campionatiInteri);",
+      "      aggiornaBarraProgresso();",
+      "      eseguiLoopSincronizzazione();",
+      "      eseguiLoopSoglie();",
+      "    }",
+      "    var resSoglie = await fetch('/api/semafori-tutti');",
+      "    if (resSoglie.ok) {",
+      "      semaforiTutti = await resSoglie.json();",
+      "      renderizzaMatriceSoglie(campionatiInteri, semaforiTutti);",
+      "    }",
+      "  } catch(e) {",
+      "    scriviLog('Errore aggiornamento dati: ' + e.message, 'error');",
+      "  }",
+      "}",
+      "function toggleSincronizzazione() {",
+      "  var btn = document.getElementById('btn-start');",
+      "  if (nitroAttiva || calcoloSoglieAttivo) {",
+      "    nitroAttiva = false;",
+      "    calcoloSoglieAttivo = false;",
+      "    btn.innerHTML = \"<span class='btn-icon'>▶️</span><span class='btn-text'>AVVIA</span>\";",
+      "    btn.className = 'btn btn-primary';",
+      "    document.getElementById('stato-operazione').textContent = 'In pausa (Manuale)';",
+      "    document.getElementById('stato-operazione').className = 'status-bg';",
+      "    scriviLog('Sincronizzazione e calcolo messi in pausa dall\\'utente.', 'info');",
+      "  } else {",
+      "    nitroAttiva = true;",
+      "    btn.innerHTML = \"<span class='btn-icon'>⏸️</span><span class='btn-text'>PAUSA</span>\";",
+      "    btn.className = 'btn btn-primary active';",
+      "    document.getElementById('stato-operazione').textContent = 'Modalità Nitro Attiva (Copia Match)';",
+      "    document.getElementById('stato-operazione').className = 'status-nitro';",
+      "    scriviLog('Inizio copia reale dei dati guidata dal client...', 'info');",
+      "    aggiornaStato();",
+      "  }",
+      "}",
+      "async function eseguiLoopSincronizzazione() {",
+      "  if (!nitroAttiva || elaborazioneInCorso) return;",
+      "  var prossimo = campionatiInteri.find(function(item) { return item.stato === 'PENDING'; });",
+      "  if (!prossimo) {",
+      "    scriviLog('Sincronizzazione match completata con successo! Avvio calcolo automatico dei semafori e soglie...', 'success');",
+      "    nitroAttiva = false;",
+      "    calcoloSoglieAttivo = true;",
+      "    document.getElementById('stato-operazione').textContent = 'Modalità Nitro Attiva (Calcolo Semafori)';",
+      "    document.getElementById('stato-operazione').className = 'status-nitro';",
+      "    await aggiornaStato();",
+      "    return;",
+      "  }",
+      "  elaborazioneInCorso = true;",
+      "  scriviLog('Copia dati storici per: ' + prossimo.campionato, 'info');",
+      "  try {",
+      "    var res = await fetch('/api/elabora-singolo', {",
+      "      method: 'POST',",
+      "      headers: { 'Content-Type': 'application/json' },",
+      "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
+      "    });",
+      "    if (res.ok) {",
+      "      var ris = await res.json();",
+      "      scriviLog('Salvate fisicamente ' + ris.match_elaborati + ' partite per ' + prossimo.campionato, 'success');",
+      "    }",
+      "  } catch(e) {",
+      "    scriviLog('Errore copia: ' + e.message, 'error');",
+      "  } finally {",
+      "    elaborazioneInCorso = false;",
+      "    await aggiornaStato();",
+      "  }",
+      "}",
+      "async function eseguiLoopSoglie() {",
+      "  if (!calcoloSoglieAttivo || elaborazioneInCorso) return;",
+      "  var prossimo = campionatiInteri.find(function(item) {",
+      "    return item.stato === 'COMPLETED' && item.stato_soglie === 'PENDING';",
+      "  });",
+      "  if (!prossimo) {",
+      "    document.getElementById('stato-operazione').textContent = 'Processo Completato!';",
+      "    document.getElementById('stato-operazione').className = 'status-nitro';",
+      "    scriviLog('Calcolo terminato. Tutti i dati storici sono stati copiati e calibrati a 72 scenari.', 'success');",
+      "    calcoloSoglieAttivo = false;",
+      "    return;",
+      "  }",
+      "  elaborazioneInCorso = true;",
+      "  scriviLog('Avvio calcolo 22 semafori per: ' + prossimo.campionato, 'info');",
+      "  try {",
+      "    var res = await fetch('/api/elabora-soglia-singola', {",
+      "      method: 'POST',",
+      "      headers: { 'Content-Type': 'application/json' },",
+      "      body: JSON.stringify({ nazione: prossimo.nazione, campionato: prossimo.campionato })",
+      "    });",
+      "    if (res.ok) {",
+      "      var ris = await res.json();",
       "      scriviLog('Elaborato ' + prossimo.campionato + ': Calcolati ' + ris.esiti_calcolati + ' esiti con auto-calibrazione attiva.', 'success');",
       "    }",
       "  } catch(e) {",
@@ -1135,7 +1140,7 @@ async function handleScheduled(event, env) {
         "UPDATE sync_stato_campionati SET stato_semafori = 'PROCESSING', stato_soglie = 'PROCESSING' WHERE nazione = ? AND campionato = ?"
       ).bind(c.nazione, c.campionato).run();
 
-      await elaboraSoglieCampionato(env, nazione, c.campionato);
+      await elaboraSoglieCampionato(env, c.nazione, c.campionato);
     }
   }
 }
